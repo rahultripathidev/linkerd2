@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ghodss/yaml"
 	"github.com/linkerd/linkerd2/pkg/charts/linkerd2"
 	"github.com/linkerd/linkerd2/pkg/k8s"
 	"github.com/linkerd/linkerd2/pkg/tls"
@@ -21,7 +22,6 @@ const (
 	upgradeProxyVersion        = "UPGRADE-PROXY-VERSION"
 	upgradeControlPlaneVersion = "UPGRADE-CONTROL-PLANE-VERSION"
 	upgradeDebugVersion        = "UPGRADE-DEBUG-VERSION"
-	overridesSecret            = "Secret/linkerd-config-overrides"
 )
 
 type (
@@ -54,10 +54,10 @@ func TestUpgradeDefault(t *testing.T) {
 	expectedManifests := parseManifestList(expected)
 	upgradeManifests := parseManifestList(upgrade.String())
 	for id, diffs := range diffManifestLists(expectedManifests, upgradeManifests) {
-		if id == overridesSecret {
-			continue
-		}
 		for _, diff := range diffs {
+			if ignorableDiff(id, diff) {
+				continue
+			}
 			t.Errorf("Unexpected diff in %s:\n%s", id, diff.String())
 		}
 	}
@@ -75,10 +75,10 @@ func TestUpgradeHA(t *testing.T) {
 	expectedManifests := parseManifestList(expected)
 	upgradeManifests := parseManifestList(upgrade.String())
 	for id, diffs := range diffManifestLists(expectedManifests, upgradeManifests) {
-		if id == overridesSecret {
-			continue
-		}
 		for _, diff := range diffs {
+			if ignorableDiff(id, diff) {
+				continue
+			}
 			t.Errorf("Unexpected diff in %s:\n%s", id, diff.String())
 		}
 	}
@@ -119,10 +119,10 @@ func TestUpgradeExternalIssuer(t *testing.T) {
 	expectedManifests := parseManifestList(expected)
 	upgradeManifests := parseManifestList(upgrade.String())
 	for id, diffs := range diffManifestLists(expectedManifests, upgradeManifests) {
-		if id == overridesSecret {
-			continue
-		}
 		for _, diff := range diffs {
+			if ignorableDiff(id, diff) {
+				continue
+			}
 			t.Errorf("Unexpected diff in %s:\n%s", id, diff.String())
 		}
 	}
@@ -190,10 +190,10 @@ func TestUpgradeOverwriteIssuer(t *testing.T) {
 	upgradeManifests := parseManifestList(upgrade.String())
 	for id, diffs := range diffManifestLists(expectedManifests, upgradeManifests) {
 		for _, diff := range diffs {
-			if isProxyEnvDiff(diff.path) {
+			if ignorableDiff(id, diff) {
 				continue
 			}
-			if id == overridesSecret {
+			if isProxyEnvDiff(diff.path) {
 				continue
 			}
 			if id == "ConfigMap/linkerd-config" {
@@ -302,10 +302,10 @@ func TestUpgradeTracingAddon(t *testing.T) {
 		}
 	}
 	for id, diffs := range diffMap {
-		if id == overridesSecret {
-			continue
-		}
 		for _, diff := range diffs {
+			if ignorableDiff(id, diff) {
+				continue
+			}
 			if id == "Deployment/linkerd-web" && pathMatch(diff.path, []string{"spec", "template", "spec", "containers", "*", "args"}) {
 				continue
 			}
@@ -344,10 +344,10 @@ func TestUpgradeOverwriteTracingAddon(t *testing.T) {
 		}
 	}
 	for id, diffs := range diffMap {
-		if id == overridesSecret {
-			continue
-		}
 		for _, diff := range diffs {
+			if ignorableDiff(id, diff) {
+				continue
+			}
 			t.Errorf("Unexpected diff in %s:\n%s", id, diff.String())
 		}
 	}
@@ -389,10 +389,10 @@ func TestUpgradeTwoLevelWebhookCrts(t *testing.T) {
 	expectedManifests := parseManifestList(expected)
 	upgradeManifests := parseManifestList(upgrade.String())
 	for id, diffs := range diffManifestLists(expectedManifests, upgradeManifests) {
-		if id == overridesSecret {
-			continue
-		}
 		for _, diff := range diffs {
+			if ignorableDiff(id, diff) {
+				continue
+			}
 			t.Errorf("Unexpected diff in %s:\n%s", id, diff.String())
 		}
 	}
@@ -410,10 +410,10 @@ func TestUpgradeWithAddonDisabled(t *testing.T) {
 	expectedManifests := parseManifestList(expected)
 	upgradeManifests := parseManifestList(upgrade.String())
 	for id, diffs := range diffManifestLists(expectedManifests, upgradeManifests) {
-		if id == overridesSecret {
-			continue
-		}
 		for _, diff := range diffs {
+			if ignorableDiff(id, diff) {
+				continue
+			}
 			t.Errorf("Unexpected diff in %s:\n%s", id, diff.String())
 		}
 	}
@@ -444,10 +444,10 @@ func TestUpgradeEnableAddon(t *testing.T) {
 		}
 	}
 	for id, diffs := range diffMap {
-		if id == overridesSecret {
-			continue
-		}
 		for _, diff := range diffs {
+			if ignorableDiff(id, diff) {
+				continue
+			}
 			if id == "RoleBinding/linkerd-psp" && pathMatch(diff.path, []string{"subjects"}) {
 				continue
 			}
@@ -472,10 +472,10 @@ func TestUpgradeRemoveAddonKeys(t *testing.T) {
 	expectedManifests := parseManifestList(expected)
 	upgradeManifests := parseManifestList(upgrade.String())
 	for id, diffs := range diffManifestLists(expectedManifests, upgradeManifests) {
-		if id == overridesSecret {
-			continue
-		}
 		for _, diff := range diffs {
+			if ignorableDiff(id, diff) {
+				continue
+			}
 			t.Errorf("Unexpected diff in %s:\n%s", id, diff.String())
 		}
 	}
@@ -501,10 +501,10 @@ func TestUpgradeOverwriteRemoveAddonKeys(t *testing.T) {
 		t.Error("Expected ConfigMap/linkerd-config-addons in upgrade output diff but was absent")
 	}
 	for id, diffs := range diffMap {
-		if id == overridesSecret {
-			continue
-		}
 		for _, diff := range diffs {
+			if ignorableDiff(id, diff) {
+				continue
+			}
 			if id == "Deployment/linkerd-grafana" && pathMatch(diff.path, []string{"spec", "template", "spec", "containers", "*", "resources"}) {
 				continue
 			}
@@ -685,6 +685,11 @@ func installValues(t *testing.T, installOpts *installOptions, installFlags *pfla
 }
 
 func renderInstall(t *testing.T, values *linkerd2.Values) bytes.Buffer {
+
+	fmt.Println("*** INSTALL VALUES ***")
+	v, _ := yaml.Marshal(values)
+	fmt.Println(string(v))
+
 	var installBuf bytes.Buffer
 	if err := render(&installBuf, values); err != nil {
 		t.Fatalf("could not render install manifests: %s", err)
@@ -718,4 +723,38 @@ func renderInstallAndUpgrade(t *testing.T, installOpts *installOptions, installF
 	installBuf := renderInstall(t, installValues(t, installOpts, installFlags))
 	upgradeBuf, err := renderUpgrade(t, installBuf.String(), upgradeOpts, upgradeFlags)
 	return installBuf, upgradeBuf, err
+}
+
+// Certain resources are expected to change during an upgrade. We can safely
+// ignore these diffs in every test.
+func ignorableDiff(id string, diff diff) bool {
+	if id == "Secret/linkerd-config-overrides" {
+		// The config overrides will always change because at least the control
+		// plane and proxy versions will change.
+		return true
+	}
+	if id == "ConfigMap/linkerd-config" {
+		// The upgrade process destroys the contents of the linkerd-config
+		// which will no longer be used.  This is a temporary state of afairs
+		// and the linkerd-config configmap will be deleted from the install
+		// chart soon.
+		return true
+	}
+	if (strings.HasPrefix(id, "MutatingWebhookConfiguration") || strings.HasPrefix(id, "ValidatingWebhookConfiguration")) &&
+		pathMatch(diff.path, []string{"webhooks", "*", "clientConfig", "caBundle"}) {
+		// Webhook TLS chains are regenerated upon upgrade so we expect the
+		// caBundle to change.
+		return true
+	}
+	if strings.HasPrefix(id, "APIService") &&
+		pathMatch(diff.path, []string{"spec", "caBundle"}) {
+		// APIService TLS chains are regenerated upon upgrade so we expect the
+		// caBundle to change.
+		return true
+	}
+	if id == "Secret/linkerd-proxy-injector-tls" || id == "Secret/linkerd-sp-validator-tls" || id == "Secret/linkerd-tap-tls" {
+		// Webhook and APIService TLS chains are regenerated upon upgrade.
+		return true
+	}
+	return false
 }

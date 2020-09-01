@@ -16,6 +16,7 @@ import (
 	"github.com/linkerd/linkerd2/pkg/issuercerts"
 	"github.com/linkerd/linkerd2/pkg/k8s"
 	"github.com/linkerd/linkerd2/pkg/tls"
+	"github.com/linkerd/linkerd2/pkg/tree"
 	"github.com/linkerd/linkerd2/pkg/version"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -209,9 +210,90 @@ func upgradeRunE(options *upgradeOptions, stage string, flags *pflag.FlagSet) er
 	return nil
 }
 
+func loadStoredValues(k *k8s.KubernetesAPI) (*charts.Values, error) {
+	secret, err := k.CoreV1().Secrets(controlPlaneNamespace).Get("linkerd-config-overrides", metav1.GetOptions{})
+	if kerrors.IsNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	bytes, ok := secret.Data["linkerd-config-overrides"]
+	if !ok {
+		return nil, errors.New("secret/linkerd-config-overrides is missing linkerd-config-overrides data")
+	}
+
+	values, err := charts.NewValues(false)
+	if err != nil {
+		return nil, err
+	}
+
+	err = yaml.Unmarshal(bytes, values)
+	if err != nil {
+		return nil, err
+	}
+
+	return values, nil
+}
+
 func (options *upgradeOptions) validateAndBuild(stage string, k *k8s.KubernetesAPI, flags *pflag.FlagSet) (*charts.Values, error) {
 	if err := options.validate(); err != nil {
 		return nil, err
+	}
+
+	storedValues, err := loadStoredValues(k)
+	if err != nil {
+		return nil, err
+	}
+
+	if storedValues != nil {
+		defaults, err := charts.NewValues(false)
+		if err != nil {
+			return nil, err
+		}
+		upgradeValues, err := options.installOptions.buildValuesWithoutIdentity(nil)
+		if err != nil {
+			return nil, err
+		}
+
+		fmt.Println("***UPGRADE OPTIONS***")
+		v, _ := yaml.Marshal(options)
+		fmt.Println(string(v))
+
+		v, _ = yaml.Marshal(upgradeValues)
+		fmt.Println("***UPGRADE VALUES***")
+		fmt.Println(string(v))
+
+		defaultsTree, err := tree.MarshalToTree(defaults)
+		if err != nil {
+			return nil, err
+		}
+
+		upgradeTree, err := tree.MarshalToTree(upgradeValues)
+		if err != nil {
+			return nil, err
+		}
+
+		upgradeOverrides, err := defaultsTree.Diff(upgradeTree)
+		if err != nil {
+			return nil, err
+		}
+
+		upgradeOverridesYAML, err := upgradeOverrides.ToYAML()
+		if err != nil {
+			return nil, err
+		}
+
+		fmt.Println("***UPGRADE OVERRIDES***")
+		fmt.Println(upgradeOverridesYAML)
+
+		err = yaml.Unmarshal([]byte(upgradeOverridesYAML), storedValues)
+		if err != nil {
+			return nil, err
+		}
+
+		return storedValues, nil
 	}
 
 	// We fetch the configs directly from kubernetes because we need to be able

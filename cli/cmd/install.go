@@ -744,6 +744,82 @@ func validateEndpointSlicesFeature() error {
 	return k8s.EndpointSliceAccess(k8sAPI)
 }
 
+func (options *installOptions) applyToValues(values *l5dcharts.Values) {
+	values.Global.ClusterDomain = options.clusterDomain
+	values.ControllerImage = fmt.Sprintf("%s/controller", options.dockerRegistry)
+	if options.controlPlaneVersion != version.Version {
+		values.Global.ControllerImageVersion = options.controlPlaneVersion
+	}
+	values.Global.ControllerLogLevel = options.controllerLogLevel
+	values.ControllerReplicas = options.controllerReplicas
+	values.ControllerUID = options.controllerUID
+	values.Global.ControlPlaneTracing = options.controlPlaneTracing
+	values.EnableH2Upgrade = !options.disableH2Upgrade
+	values.EnablePodAntiAffinity = options.highAvailability
+	values.Global.HighAvailability = options.highAvailability
+	values.Global.ImagePullPolicy = options.imagePullPolicy
+	values.Global.Namespace = controlPlaneNamespace
+	values.Global.CNIEnabled = options.cniEnabled
+	values.Global.EnableEndpointSlices = options.enableEndpointSlices
+	values.OmitWebhookSideEffects = options.omitWebhookSideEffects
+	values.HeartbeatSchedule = options.heartbeatSchedule()
+	values.RestrictDashboardPrivileges = options.restrictDashboardPrivileges
+	values.DisableHeartBeat = options.disableHeartbeat
+	values.WebImage = fmt.Sprintf("%s/web", options.dockerRegistry)
+	if options.dockerRegistry != "gcr.io/linkerd-io" {
+		if values.Grafana["image"] == nil {
+			values.Grafana["image"] = map[string]interface{}{}
+		}
+		values.Grafana["image"].(map[string]interface{})["name"] = fmt.Sprintf("%s/grafana", options.dockerRegistry)
+	}
+
+	values.Global.Proxy = &l5dcharts.Proxy{
+		DestinationGetNetworks: strings.Join(options.destinationGetNetworks, ","),
+		EnableExternalProfiles: options.enableExternalProfiles,
+		OutboundConnectTimeout: options.outboundConnectTimeout,
+		InboundConnectTimeout:  options.inboundConnectTimeout,
+		Image: &l5dcharts.Image{
+			Name:       registryOverride(options.proxyImage, options.dockerRegistry),
+			PullPolicy: options.imagePullPolicy,
+			Version:    options.proxyVersion,
+		},
+		LogLevel:  options.proxyLogLevel,
+		LogFormat: options.proxyLogFormat,
+		Ports: &l5dcharts.Ports{
+			Admin:    int32(options.proxyAdminPort),
+			Control:  int32(options.proxyControlPort),
+			Inbound:  int32(options.proxyInboundPort),
+			Outbound: int32(options.proxyOutboundPort),
+		},
+		Resources: &l5dcharts.Resources{
+			CPU: l5dcharts.Constraints{
+				Limit:   options.proxyCPULimit,
+				Request: options.proxyCPURequest,
+			},
+			Memory: l5dcharts.Constraints{
+				Limit:   options.proxyMemoryLimit,
+				Request: options.proxyMemoryRequest,
+			},
+		},
+		UID:   options.proxyUID,
+		Trace: values.Global.Proxy.Trace,
+	}
+
+	values.Global.ProxyInit.Image.Name = registryOverride(options.initImage, options.dockerRegistry)
+	values.Global.ProxyInit.Image.PullPolicy = options.imagePullPolicy
+	values.Global.ProxyInit.Image.Version = options.initImageVersion
+	values.Global.ProxyInit.IgnoreInboundPorts = strings.Join(options.ignoreInboundPorts, ",")
+	values.Global.ProxyInit.IgnoreOutboundPorts = strings.Join(options.ignoreOutboundPorts, ",")
+	values.Global.ProxyInit.XTMountPath = &l5dcharts.VolumeMountPath{
+		MountPath: k8s.MountPathXtablesLock,
+		Name:      k8s.InitXtablesLockVolumeMountName,
+	}
+
+	values.DebugContainer.Image.Name = registryOverride(options.debugImage, options.dockerRegistry)
+	values.DebugContainer.Image.PullPolicy = options.imagePullPolicy
+	values.DebugContainer.Image.Version = options.debugImageVersion
+}
+
 // buildValuesWithoutIdentity builds the values that will be used to render
 // the Helm templates. It overrides the defaults values with CLI options.
 func (options *installOptions) buildValuesWithoutIdentity(configs *pb.All) (*l5dcharts.Values, error) {
@@ -774,109 +850,42 @@ func (options *installOptions) buildValuesWithoutIdentity(configs *pb.All) (*l5d
 			options.proxyMemoryLimit = installValues.Global.Proxy.Resources.Memory.Limit
 		}
 
-		// `configs` was built before the HA option is evaluated, so we need
-		// to make sure the HA proxy resources are added here.
-		if configs.Proxy.Resource.RequestCpu == "" {
-			configs.Proxy.Resource.RequestCpu = options.proxyCPURequest
-		}
+		if configs != nil {
+			// `configs` was built before the HA option is evaluated, so we need
+			// to make sure the HA proxy resources are added here.
+			if configs.Proxy.Resource.RequestCpu == "" {
+				configs.Proxy.Resource.RequestCpu = options.proxyCPURequest
+			}
 
-		if configs.Proxy.Resource.RequestMemory == "" {
-			configs.Proxy.Resource.RequestMemory = options.proxyMemoryRequest
-		}
+			if configs.Proxy.Resource.RequestMemory == "" {
+				configs.Proxy.Resource.RequestMemory = options.proxyMemoryRequest
+			}
 
-		if configs.Proxy.Resource.LimitCpu == "" {
-			configs.Proxy.Resource.LimitCpu = options.proxyCPULimit
-		}
+			if configs.Proxy.Resource.LimitCpu == "" {
+				configs.Proxy.Resource.LimitCpu = options.proxyCPULimit
+			}
 
-		if configs.Proxy.Resource.LimitMemory == "" {
-			configs.Proxy.Resource.LimitMemory = options.proxyMemoryLimit
+			if configs.Proxy.Resource.LimitMemory == "" {
+				configs.Proxy.Resource.LimitMemory = options.proxyMemoryLimit
+			}
 		}
 
 		options.identityOptions.replicas = options.controllerReplicas
 	}
 
-	globalJSON, proxyJSON, installJSON, err := config.ToJSON(configs)
-	if err != nil {
-		return nil, err
+	if configs != nil {
+		globalJSON, proxyJSON, installJSON, err := config.ToJSON(configs)
+		if err != nil {
+			return nil, err
+		}
+
+		installValues.Configs.Global = globalJSON
+		installValues.Configs.Proxy = proxyJSON
+		installValues.Configs.Install = installJSON
 	}
 
 	// override default values with CLI options
-	installValues.Global.ClusterDomain = configs.GetGlobal().GetClusterDomain()
-	installValues.Configs.Global = globalJSON
-	installValues.Configs.Proxy = proxyJSON
-	installValues.Configs.Install = installJSON
-	installValues.ControllerImage = fmt.Sprintf("%s/controller", options.dockerRegistry)
-	if configs.GetGlobal().GetVersion() != version.Version {
-		installValues.Global.ControllerImageVersion = configs.GetGlobal().GetVersion()
-	}
-	installValues.Global.ControllerLogLevel = options.controllerLogLevel
-	installValues.ControllerReplicas = options.controllerReplicas
-	installValues.ControllerUID = options.controllerUID
-	installValues.Global.ControlPlaneTracing = options.controlPlaneTracing
-	installValues.EnableH2Upgrade = !options.disableH2Upgrade
-	installValues.EnablePodAntiAffinity = options.highAvailability
-	installValues.Global.HighAvailability = options.highAvailability
-	installValues.Global.ImagePullPolicy = options.imagePullPolicy
-	installValues.Global.Namespace = controlPlaneNamespace
-	installValues.Global.CNIEnabled = options.cniEnabled
-	installValues.Global.EnableEndpointSlices = options.enableEndpointSlices
-	installValues.OmitWebhookSideEffects = options.omitWebhookSideEffects
-	installValues.HeartbeatSchedule = options.heartbeatSchedule()
-	installValues.RestrictDashboardPrivileges = options.restrictDashboardPrivileges
-	installValues.DisableHeartBeat = options.disableHeartbeat
-	installValues.WebImage = fmt.Sprintf("%s/web", options.dockerRegistry)
-	if options.dockerRegistry != "gcr.io/linkerd-io" {
-		if installValues.Grafana["image"] == nil {
-			installValues.Grafana["image"] = map[string]interface{}{}
-		}
-		installValues.Grafana["image"].(map[string]interface{})["name"] = fmt.Sprintf("%s/grafana", options.dockerRegistry)
-	}
-
-	installValues.Global.Proxy = &l5dcharts.Proxy{
-		DestinationGetNetworks: strings.Join(options.destinationGetNetworks, ","),
-		EnableExternalProfiles: options.enableExternalProfiles,
-		OutboundConnectTimeout: options.outboundConnectTimeout,
-		InboundConnectTimeout:  options.inboundConnectTimeout,
-		Image: &l5dcharts.Image{
-			Name:       registryOverride(options.proxyImage, options.dockerRegistry),
-			PullPolicy: options.imagePullPolicy,
-			Version:    options.proxyVersion,
-		},
-		LogLevel:  options.proxyLogLevel,
-		LogFormat: options.proxyLogFormat,
-		Ports: &l5dcharts.Ports{
-			Admin:    int32(options.proxyAdminPort),
-			Control:  int32(options.proxyControlPort),
-			Inbound:  int32(options.proxyInboundPort),
-			Outbound: int32(options.proxyOutboundPort),
-		},
-		Resources: &l5dcharts.Resources{
-			CPU: l5dcharts.Constraints{
-				Limit:   options.proxyCPULimit,
-				Request: options.proxyCPURequest,
-			},
-			Memory: l5dcharts.Constraints{
-				Limit:   options.proxyMemoryLimit,
-				Request: options.proxyMemoryRequest,
-			},
-		},
-		UID:   options.proxyUID,
-		Trace: installValues.Global.Proxy.Trace,
-	}
-
-	installValues.Global.ProxyInit.Image.Name = registryOverride(options.initImage, options.dockerRegistry)
-	installValues.Global.ProxyInit.Image.PullPolicy = options.imagePullPolicy
-	installValues.Global.ProxyInit.Image.Version = options.initImageVersion
-	installValues.Global.ProxyInit.IgnoreInboundPorts = strings.Join(options.ignoreInboundPorts, ",")
-	installValues.Global.ProxyInit.IgnoreOutboundPorts = strings.Join(options.ignoreOutboundPorts, ",")
-	installValues.Global.ProxyInit.XTMountPath = &l5dcharts.VolumeMountPath{
-		MountPath: k8s.MountPathXtablesLock,
-		Name:      k8s.InitXtablesLockVolumeMountName,
-	}
-
-	installValues.DebugContainer.Image.Name = registryOverride(options.debugImage, options.dockerRegistry)
-	installValues.DebugContainer.Image.PullPolicy = options.imagePullPolicy
-	installValues.DebugContainer.Image.Version = options.debugImageVersion
+	options.applyToValues(installValues)
 
 	return installValues, nil
 }
