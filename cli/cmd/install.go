@@ -9,11 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/golang/protobuf/ptypes"
 	pb "github.com/linkerd/linkerd2/controller/gen/config"
 	"github.com/linkerd/linkerd2/pkg/charts"
 	l5dcharts "github.com/linkerd/linkerd2/pkg/charts/linkerd2"
-	"github.com/linkerd/linkerd2/pkg/config"
 	"github.com/linkerd/linkerd2/pkg/healthcheck"
 	"github.com/linkerd/linkerd2/pkg/issuercerts"
 	"github.com/linkerd/linkerd2/pkg/k8s"
@@ -33,52 +31,50 @@ import (
 )
 
 type (
-	// installOptions holds values for command line flags that apply to the install
+	allStageOptions struct {
+		cniEnabled                  bool
+		restrictDashboardPrivileges bool
+		addOnConfig                 string
+	}
+
+	installOptions struct {
+		clusterDomain          string
+		identityExternalIssuer bool
+		trustDomain            string
+	}
+
+	// installAndUpgradeOptions holds values for command line flags that apply
+	// to the install
 	// command. All fields in this struct should have corresponding flags added in
 	// the newCmdInstall func later in this file. It also embeds proxyConfigOptions
 	// in order to hold values for command line flags that apply to both inject and
 	// install.
-	installOptions struct {
-		clusterDomain               string
-		addOnConfig                 string
-		controlPlaneVersion         string
-		controllerReplicas          uint
-		controllerLogLevel          string
-		highAvailability            bool
-		controllerUID               int64
-		disableH2Upgrade            bool
-		disableHeartbeat            bool
-		cniEnabled                  bool
-		enableEndpointSlices        bool
-		skipChecks                  bool
-		omitWebhookSideEffects      bool
-		restrictDashboardPrivileges bool
-		controlPlaneTracing         bool
-		identityOptions             *installIdentityOptions
+	installUpgradeOptions struct {
+		controlPlaneVersion    string
+		controllerReplicas     uint
+		controllerLogLevel     string
+		highAvailability       bool
+		controllerUID          int64
+		disableH2Upgrade       bool
+		disableHeartbeat       bool
+		enableEndpointSlices   bool
+		omitWebhookSideEffects bool
+		controlPlaneTracing    bool
+		identityOptions        *installIdentityOptions
 		*proxyConfigOptions
-
-		recordedFlags []*pb.Install_Flag
-
-		// function pointers that can be overridden for tests
-		heartbeatSchedule func() string
 	}
 
 	installIdentityOptions struct {
-		replicas    uint
-		trustDomain string
+		trustPEMFile, crtPEMFile, keyPEMFile string
 
 		issuanceLifetime   time.Duration
 		clockSkewAllowance time.Duration
-
-		trustPEMFile, crtPEMFile, keyPEMFile string
-		identityExternalIssuer               bool
 	}
 
 	// helper struct to move those values together
-	identityWithAnchorsAndTrustDomain struct {
+	identityWithAnchors struct {
 		Identity        *l5dcharts.Identity
 		TrustAnchorsPEM string
-		TrustDomain     string
 	}
 )
 
@@ -147,107 +143,14 @@ var (
 		"templates/tap.yaml",
 		"templates/linkerd-config-addons.yaml",
 	}
+
+	ignoreCluster bool
 )
 
-// newInstallOptionsWithDefaults initializes install options with default
-// control plane and proxy options. These defaults are read from the Helm
-// values.yaml and values-ha.yaml files.
-//
-// These options may be overridden on the CLI at install-time and will be
-// persisted in Linkerd's control plane configuration to be used at
-// injection-time.
-func newInstallOptionsWithDefaults() (*installOptions, error) {
-	defaults, err := l5dcharts.NewValues(false)
-	if err != nil {
-		return nil, err
-	}
-
-	issuanceLifetime, err := time.ParseDuration(defaults.Identity.Issuer.IssuanceLifetime)
-	if err != nil {
-		return nil, err
-	}
-
-	clockSkewAllowance, err := time.ParseDuration(defaults.Identity.Issuer.ClockSkewAllowance)
-	if err != nil {
-		return nil, err
-	}
-
-	return &installOptions{
-		clusterDomain:               defaults.Global.ClusterDomain,
-		controlPlaneVersion:         version.Version,
-		controllerReplicas:          defaults.ControllerReplicas,
-		controllerLogLevel:          defaults.Global.ControllerLogLevel,
-		highAvailability:            defaults.Global.HighAvailability,
-		controllerUID:               defaults.ControllerUID,
-		disableH2Upgrade:            !defaults.EnableH2Upgrade,
-		disableHeartbeat:            defaults.DisableHeartBeat,
-		cniEnabled:                  defaults.Global.CNIEnabled,
-		enableEndpointSlices:        defaults.Global.EnableEndpointSlices,
-		omitWebhookSideEffects:      defaults.OmitWebhookSideEffects,
-		restrictDashboardPrivileges: defaults.RestrictDashboardPrivileges,
-		controlPlaneTracing:         defaults.Global.ControlPlaneTracing,
-		proxyConfigOptions: &proxyConfigOptions{
-			proxyVersion:           version.Version,
-			ignoreCluster:          false,
-			proxyImage:             defaults.Global.Proxy.Image.Name,
-			destinationGetNetworks: strings.Split(defaults.Global.Proxy.DestinationGetNetworks, ","),
-			initImage:              defaults.Global.ProxyInit.Image.Name,
-			initImageVersion:       version.ProxyInitVersion,
-			debugImage:             defaults.DebugContainer.Image.Name,
-			debugImageVersion:      version.Version,
-			dockerRegistry:         defaultDockerRegistry,
-			imagePullPolicy:        defaults.Global.ImagePullPolicy,
-			ignoreInboundPorts:     nil,
-			ignoreOutboundPorts:    nil,
-			proxyUID:               defaults.Global.Proxy.UID,
-			proxyLogLevel:          defaults.Global.Proxy.LogLevel,
-			proxyLogFormat:         defaults.Global.Proxy.LogFormat,
-			proxyControlPort:       uint(defaults.Global.Proxy.Ports.Control),
-			proxyAdminPort:         uint(defaults.Global.Proxy.Ports.Admin),
-			proxyInboundPort:       uint(defaults.Global.Proxy.Ports.Inbound),
-			proxyOutboundPort:      uint(defaults.Global.Proxy.Ports.Outbound),
-			proxyCPURequest:        defaults.Global.Proxy.Resources.CPU.Request,
-			proxyMemoryRequest:     defaults.Global.Proxy.Resources.Memory.Request,
-			proxyCPULimit:          defaults.Global.Proxy.Resources.CPU.Limit,
-			proxyMemoryLimit:       defaults.Global.Proxy.Resources.Memory.Limit,
-			enableExternalProfiles: defaults.Global.Proxy.EnableExternalProfiles,
-			waitBeforeExitSeconds:  defaults.Global.Proxy.WaitBeforeExitSeconds,
-			inboundConnectTimeout:  defaults.Global.Proxy.InboundConnectTimeout,
-			outboundConnectTimeout: defaults.Global.Proxy.OutboundConnectTimeout,
-		},
-		identityOptions: &installIdentityOptions{
-			trustDomain:            defaults.Global.IdentityTrustDomain,
-			issuanceLifetime:       issuanceLifetime,
-			clockSkewAllowance:     clockSkewAllowance,
-			identityExternalIssuer: false,
-		},
-
-		heartbeatSchedule: func() string {
-			// Some of the heartbeat Prometheus queries rely on 5m resolution, which
-			// means at least 5 minutes of data available. Start the first CronJob 10
-			// minutes after `linkerd install` is run, to give the user 5 minutes to
-			// install.
-			t := time.Now().Add(10 * time.Minute).UTC()
-			return fmt.Sprintf("%d %d * * * ", t.Minute(), t.Hour())
-		},
-	}, nil
-}
-
-// Flag configuration matrix
-//
-//                                 | recordableFlagSet | allStageFlagSet | installOnlyFlagSet | installPersistentFlagSet | upgradeOnlyFlagSet | "skip-checks" |
-// `linkerd install`               |        X          |       X         |         X          |            X             |                    |               |
-// `linkerd install config`        |                   |       X         |                    |            X             |                    |               |
-// `linkerd install control-plane` |        X          |       X         |         X          |            X             |                    |       X       |
-// `linkerd upgrade`               |        X          |       X         |                    |                          |          X         |               |
-// `linkerd upgrade config`        |                   |       X         |                    |                          |                    |               |
-// `linkerd upgrade control-plane` |        X          |       X         |                    |                          |          X         |               |
-//
-// allStageFlagSet is a subset of recordableFlagSet, but is also added to `linkerd [install|upgrade] config`
-// proxyConfigOptions.flagSet is a subset of recordableFlagSet, and is used by `linkerd inject`.
-
 // newCmdInstallConfig is a subcommand for `linkerd install config`
-func newCmdInstallConfig(options *installOptions, parentFlags *pflag.FlagSet) *cobra.Command {
+func newCmdInstallConfig(values *l5dcharts.Values) *cobra.Command {
+	flags, options := makeAllStageFlags(values)
+
 	cmd := &cobra.Command{
 		Use:   "config [flags]",
 		Args:  cobra.NoArgs,
@@ -263,7 +166,7 @@ resources for the Linkerd control plane. This command should be followed by
   # Install Linkerd into a non-default namespace.
   linkerd install config -l linkerdtest | kubectl apply -f -`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if !options.ignoreCluster {
+			if !ignoreCluster {
 				if err := errAfterRunningChecks(options); err != nil {
 					if healthcheck.IsCategoryError(err, healthcheck.KubernetesAPIChecks) {
 						fmt.Fprintf(os.Stderr, errMsgCannotInitializeClient, err)
@@ -273,21 +176,29 @@ resources for the Linkerd control plane. This command should be followed by
 					os.Exit(1)
 				}
 			}
-			return installRunE(options, configStage, parentFlags)
+
+			options.applyToValues(values)
+
+			return render(os.Stdout, values, configStage)
 		},
 	}
 
-	cmd.Flags().AddFlagSet(options.allStageFlagSet())
+	cmd.Flags().AddFlagSet(flags)
 
 	return cmd
 }
 
 // newCmdInstallControlPlane is a subcommand for `linkerd install control-plane`
-func newCmdInstallControlPlane(options *installOptions) *cobra.Command {
-	// The base flags are recorded separately so that they can be serialized into
-	// the configuration in validateAndBuild.
-	flags := options.recordableFlagSet()
-	installOnlyFlags := options.installOnlyFlagSet()
+func newCmdInstallControlPlane(values *l5dcharts.Values) *cobra.Command {
+	var skipChecks bool
+
+	allStageFlags, allStageOptions := makeAllStageFlags(values)
+	installOnlyFlags, installOnlyOptions := makeInstallOnlyFlags(values)
+	installUpgradeFlags, installUpgradeOptions, err := makeInstallUpgradeFlags(values)
+	if err != nil {
+		fmt.Fprint(os.Stderr, err.Error())
+		os.Exit(1)
+	}
 
 	cmd := &cobra.Command{
 		Use:   "control-plane [flags]",
@@ -303,38 +214,48 @@ control plane. It should be run after "linkerd install config".`,
   # Install Linkerd into a non-default namespace.
   linkerd install control-plane -l linkerdtest | kubectl apply -f -`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if !options.skipChecks {
+			if !skipChecks {
 				// check if global resources exist to determine if the `install config`
 				// stage succeeded
-				if err := errAfterRunningChecks(options); err == nil {
+				if err := errAfterRunningChecks(allStageOptions); err == nil {
 					if healthcheck.IsCategoryError(err, healthcheck.KubernetesAPIChecks) {
-						fmt.Fprintf(os.Stderr, errMsgCannotInitializeClient, err)
-					} else {
 						fmt.Fprintf(os.Stderr, errMsgGlobalResourcesMissing, controlPlaneNamespace)
 					}
 					os.Exit(1)
 				}
 			}
 
-			if !options.ignoreCluster {
-				if err := errIfLinkerdConfigConfigMapExists(); err != nil {
+			if !ignoreCluster {
+				k8sAPI, err := k8s.NewAPI(kubeconfigPath, kubeContext, impersonate, impersonateGroup, 30*time.Second)
+				if err != nil {
+					return err
+				}
+				stored, err := loadStoredValues(k8sAPI)
+				if err != nil {
+					return err
+				}
+				if stored != nil {
+					fmt.Fprintf(os.Stderr, errMsgLinkerdConfigResourceConflict, controlPlaneNamespace, "Secret/linkerd-config-overrides already exists")
+					os.Exit(1)
+				}
+				err = errIfLinkerdConfigConfigMapExists()
+				if err != nil {
 					fmt.Fprintf(os.Stderr, errMsgLinkerdConfigResourceConflict, controlPlaneNamespace, err.Error())
 					os.Exit(1)
 				}
-
 			}
 
-			return installRunE(options, controlPlaneStage, flags)
+			allStageOptions.applyToValues(values)
+			installOnlyOptions.applyToValues(values)
+			installUpgradeOptions.applyToValues(values)
+
+			return render(os.Stdout, values, controlPlaneStage)
 		},
 	}
 
-	cmd.PersistentFlags().BoolVar(
-		&options.skipChecks, "skip-checks", options.skipChecks,
-		`Skip checks for namespace existence`,
-	)
-	cmd.PersistentFlags().AddFlagSet(flags)
-	// Some flags are not available during upgrade, etc.
-	cmd.PersistentFlags().AddFlagSet(installOnlyFlags)
+	cmd.Flags().AddFlagSet(allStageFlags)
+	cmd.Flags().AddFlagSet(installOnlyFlags)
+	cmd.Flags().AddFlagSet(installUpgradeFlags)
 
 	return cmd
 }
@@ -388,7 +309,7 @@ control plane.`,
 
 	// Some flags are not available during upgrade, etc.
 	cmd.Flags().AddFlagSet(installOnlyFlags)
-	cmd.PersistentFlags().AddFlagSet(installPersistentFlags)
+	cmd.Flags().AddFlagSet(installPersistentFlags)
 
 	cmd.AddCommand(newCmdInstallConfig(options, flags))
 	cmd.AddCommand(newCmdInstallControlPlane(options))
@@ -489,73 +410,88 @@ func renderOverrides(values *l5dcharts.Values, namespace string) ([]byte, error)
 }
 
 // recordableFlagSet returns flags usable during install or upgrade.
-func (options *installOptions) recordableFlagSet() *pflag.FlagSet {
-	e := pflag.ExitOnError
-
-	flags := pflag.NewFlagSet("install", e)
-
-	flags.AddFlagSet(options.proxyConfigOptions.flagSet(e))
-	flags.AddFlagSet(options.allStageFlagSet())
+func makeInstallUpgradeFlags(defaults *l5dcharts.Values) (*pflag.FlagSet, *installUpgradeOptions, error) {
+	var options installUpgradeOptions
+	flags := pflag.NewFlagSet("install", pflag.ExitOnError)
+	flags.AddFlagSet(options.proxyConfigOptions.flagSet(pflag.ExitOnError))
 
 	flags.UintVar(
-		&options.controllerReplicas, "controller-replicas", options.controllerReplicas,
+		&options.controllerReplicas, "controller-replicas", defaults.ControllerReplicas,
 		"Replicas of the controller to deploy",
 	)
 
 	flags.StringVar(
-		&options.controllerLogLevel, "controller-log-level", options.controllerLogLevel,
+		&options.controllerLogLevel, "controller-log-level", defaults.Global.ControllerLogLevel,
 		"Log level for the controller and web components",
 	)
 
 	flags.BoolVar(
-		&options.highAvailability, "ha", options.highAvailability,
+		&options.highAvailability, "ha", false,
 		"Enable HA deployment config for the control plane (default false)",
 	)
+
 	flags.Int64Var(
-		&options.controllerUID, "controller-uid", options.controllerUID,
+		&options.controllerUID, "controller-uid", defaults.ControllerUID,
 		"Run the control plane components under this user ID",
 	)
+
 	flags.BoolVar(
-		&options.disableH2Upgrade, "disable-h2-upgrade", options.disableH2Upgrade,
+		&options.disableH2Upgrade, "disable-h2-upgrade", !defaults.EnableH2Upgrade,
 		"Prevents the controller from instructing proxies to perform transparent HTTP/2 upgrading (default false)",
 	)
+
 	flags.BoolVar(
-		&options.disableHeartbeat, "disable-heartbeat", options.disableHeartbeat,
+		&options.disableHeartbeat, "disable-heartbeat", defaults.DisableHeartBeat,
 		"Disables the heartbeat cronjob (default false)",
 	)
+
+	issuanceLifetime, err := time.ParseDuration(defaults.Identity.Issuer.IssuanceLifetime)
+	if err != nil {
+		return nil, nil, err
+	}
 	flags.DurationVar(
-		&options.identityOptions.issuanceLifetime, "identity-issuance-lifetime", options.identityOptions.issuanceLifetime,
+		&options.identityOptions.issuanceLifetime, "identity-issuance-lifetime", issuanceLifetime,
 		"The amount of time for which the Identity issuer should certify identity",
 	)
+
+	clockSkewAllowance, err := time.ParseDuration(defaults.Identity.Issuer.ClockSkewAllowance)
+	if err != nil {
+		return nil, nil, err
+	}
 	flags.DurationVar(
-		&options.identityOptions.clockSkewAllowance, "identity-clock-skew-allowance", options.identityOptions.clockSkewAllowance,
+		&options.identityOptions.clockSkewAllowance, "identity-clock-skew-allowance", clockSkewAllowance,
 		"The amount of time to allow for clock skew within a Linkerd cluster",
 	)
+
 	flags.BoolVar(
-		&options.omitWebhookSideEffects, "omit-webhook-side-effects", options.omitWebhookSideEffects,
+		&options.omitWebhookSideEffects, "omit-webhook-side-effects", defaults.OmitWebhookSideEffects,
 		"Omit the sideEffects flag in the webhook manifests, This flag must be provided during install or upgrade for Kubernetes versions pre 1.12",
 	)
+
 	flags.BoolVar(
-		&options.controlPlaneTracing, "control-plane-tracing", options.controlPlaneTracing,
+		&options.controlPlaneTracing, "control-plane-tracing", defaults.Global.ControlPlaneTracing,
 		"Enables Control Plane Tracing with the defaults",
 	)
+
 	flags.StringVar(
-		&options.identityOptions.crtPEMFile, "identity-issuer-certificate-file", options.identityOptions.crtPEMFile,
+		&options.identityOptions.crtPEMFile, "identity-issuer-certificate-file", "",
 		"A path to a PEM-encoded file containing the Linkerd Identity issuer certificate (generated by default)",
 	)
+
 	flags.StringVar(
-		&options.identityOptions.keyPEMFile, "identity-issuer-key-file", options.identityOptions.keyPEMFile,
+		&options.identityOptions.keyPEMFile, "identity-issuer-key-file", "",
 		"A path to a PEM-encoded file containing the Linkerd Identity issuer private key (generated by default)",
 	)
+
 	flags.StringVar(
-		&options.identityOptions.trustPEMFile, "identity-trust-anchors-file", options.identityOptions.trustPEMFile,
+		&options.identityOptions.trustPEMFile, "identity-trust-anchors-file", "",
 		"A path to a PEM-encoded file containing Linkerd Identity trust anchors (generated by default)",
 	)
 
-	flags.BoolVar(&options.enableEndpointSlices, "enable-endpoint-slices", options.enableEndpointSlices,
+	flags.BoolVar(&options.enableEndpointSlices, "enable-endpoint-slices", defaults.Global.EnableEndpointSlices,
 		"Enables the usage of EndpointSlice informers and resources for destination service")
 
-	flags.StringVarP(&options.controlPlaneVersion, "control-plane-version", "", options.controlPlaneVersion, "Tag to be used for the control plane component images")
+	flags.StringVarP(&options.controlPlaneVersion, "control-plane-version", "", defaults.ControllerImageVersion, "Tag to be used for the control plane component images")
 
 	// Hide developer focused flags in release builds.
 	release, err := version.IsReleaseChannel(version.Version)
@@ -572,101 +508,50 @@ func (options *installOptions) recordableFlagSet() *pflag.FlagSet {
 	}
 
 	flags.MarkHidden("control-plane-tracing")
-	return flags
+	return flags, &options, nil
 }
 
 // allStageFlagSet returns flags usable for single and multi-stage  installs and
 // upgrades. For multi-stage installs, users must set these flags consistently
 // across commands.
-func (options *installOptions) allStageFlagSet() *pflag.FlagSet {
+func makeAllStageFlags(defaults *l5dcharts.Values) (*pflag.FlagSet, *allStageOptions) {
+	var options allStageOptions
 	flags := pflag.NewFlagSet("all-stage", pflag.ExitOnError)
 
-	flags.BoolVar(&options.cniEnabled, "linkerd-cni-enabled", options.cniEnabled,
+	flags.BoolVar(&options.cniEnabled, "linkerd-cni-enabled", defaults.Global.CNIEnabled,
 		"Omit the NET_ADMIN capability in the PSP and the proxy-init container when injecting the proxy; requires the linkerd-cni plugin to already be installed",
 	)
 
 	flags.BoolVar(
-		&options.restrictDashboardPrivileges, "restrict-dashboard-privileges", options.restrictDashboardPrivileges,
+		&options.restrictDashboardPrivileges, "restrict-dashboard-privileges", defaults.RestrictDashboardPrivileges,
 		"Restrict the Linkerd Dashboard's default privileges to disallow Tap and Check",
 	)
 
 	flags.StringVar(
-		&options.addOnConfig, "addon-config", options.addOnConfig,
+		&options.addOnConfig, "addon-config", "",
 		"A path to a configuration file of add-ons. If add-on config already exists, this new config gets merged with the existing one (unless --addon-overwrite is used)",
 	)
 
-	return flags
+	return flags, &options
 }
 
 // installOnlyFlagSet includes flags that are only accessible at install-time
 // and not at upgrade-time.
-func (options *installOptions) installOnlyFlagSet() *pflag.FlagSet {
-	flags := pflag.NewFlagSet("install-only", pflag.ExitOnError)
-
+func installFlags(flags *pflag.FlagSet, defaults *l5dcharts.Values) installOptions {
+	options := installOptions{}
 	flags.StringVar(
-		&options.clusterDomain, "cluster-domain", options.clusterDomain,
+		&options.clusterDomain, "cluster-domain", defaults.Global.ClusterDomain,
 		"Set custom cluster domain",
 	)
 	flags.StringVar(
-		&options.identityOptions.trustDomain, "identity-trust-domain", options.identityOptions.trustDomain,
+		&options.trustDomain, "identity-trust-domain", defaults.Global.IdentityTrustDomain,
 		"Configures the name suffix used for identities.",
 	)
 	flags.BoolVar(
-		&options.identityOptions.identityExternalIssuer, "identity-external-issuer", options.identityOptions.identityExternalIssuer,
+		&options.identityExternalIssuer, "identity-external-issuer", false,
 		"Whether to use an external identity issuer (default false)",
 	)
-	return flags
-}
-
-// installPersistentFlagSet includes flags that are only accessible at
-// install-time, not at upgrade-time, and are also used by install subcommands.
-func (options *installOptions) installPersistentFlagSet() *pflag.FlagSet {
-	flags := pflag.NewFlagSet("install-persist", pflag.ExitOnError)
-
-	flags.BoolVar(
-		&options.ignoreCluster, "ignore-cluster", options.ignoreCluster,
-		"Ignore the current Kubernetes cluster when checking for existing cluster configuration (default false)",
-	)
-
-	return flags
-}
-
-// UpdateAddOnValuesFromConfig takes a values struct and updates its add-on values from the config installOption
-func (options *installOptions) UpdateAddOnValuesFromConfig(values *l5dcharts.Values) error {
-
-	if options.addOnConfig != "" {
-		addOnValues, err := read(options.addOnConfig)
-		if err != nil {
-			return err
-		}
-
-		if len(addOnValues) != 1 {
-			return fmt.Errorf("Excepted a single configuration file, but got 0 or many")
-		}
-
-		addOnValuesRaw, err := ioutil.ReadAll(addOnValues[0])
-		if err != nil {
-			return err
-		}
-
-		rawValues, err := yaml.Marshal(values)
-		if err != nil {
-			return err
-		}
-
-		// Merge Add-On Values with Values
-		finalValues, err := mergeRaw(rawValues, addOnValuesRaw)
-		if err != nil {
-			return err
-		}
-
-		if err = yaml.Unmarshal(finalValues, values); err != nil {
-			return nil
-		}
-
-	}
-
-	return nil
+	return options
 }
 
 func mergeRaw(a, b []byte) ([]byte, error) {
@@ -685,26 +570,6 @@ func mergeRaw(a, b []byte) ([]byte, error) {
 	aMap.MergeInto(bMap)
 	return yaml.Marshal(aMap)
 
-}
-
-func (options *installOptions) recordFlags(flags *pflag.FlagSet) {
-	if flags == nil {
-		return
-	}
-
-	flags.VisitAll(func(f *pflag.Flag) {
-		if f.Changed {
-			switch f.Name {
-			case "ignore-cluster", "control-plane-version", "proxy-version", "identity-issuer-certificate-file", "identity-issuer-key-file", "identity-trust-anchors-file", "addon-config":
-				// These flags don't make sense to record.
-			default:
-				options.recordedFlags = append(options.recordedFlags, &pb.Install_Flag{
-					Name:  f.Name,
-					Value: f.Value.String(),
-				})
-			}
-		}
-	})
 }
 
 func (options *installOptions) validate() error {
@@ -744,8 +609,56 @@ func validateEndpointSlicesFeature() error {
 	return k8s.EndpointSliceAccess(k8sAPI)
 }
 
+func (options *allStageOptions) applyToValues(values *l5dcharts.Values) error {
+	values.Global.CNIEnabled = options.cniEnabled
+	values.RestrictDashboardPrivileges = options.restrictDashboardPrivileges
+
+	if options.addOnConfig != "" {
+		addOnValues, err := read(options.addOnConfig)
+		if err != nil {
+			return err
+		}
+
+		if len(addOnValues) != 1 {
+			return fmt.Errorf("Excepted a single configuration file, but got 0 or many")
+		}
+
+		addOnValuesRaw, err := ioutil.ReadAll(addOnValues[0])
+		if err != nil {
+			return err
+		}
+
+		rawValues, err := yaml.Marshal(values)
+		if err != nil {
+			return err
+		}
+
+		// Merge Add-On Values with Values
+		finalValues, err := mergeRaw(rawValues, addOnValuesRaw)
+		if err != nil {
+			return err
+		}
+
+		err = yaml.Unmarshal(finalValues, values)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (options *installOptions) applyToValues(values *l5dcharts.Values) {
 	values.Global.ClusterDomain = options.clusterDomain
+	values.Global.IdentityTrustDomain = options.trustDomain
+	if options.identityExternalIssuer {
+		values.Identity.Issuer.Scheme = string(corev1.SecretTypeTLS)
+	} else {
+		values.Identity.Issuer.Scheme = consts.IdentityIssuerSchemeLinkerd
+	}
+}
+
+func (options *installUpgradeOptions) applyToValues(values *l5dcharts.Values) error {
+
 	values.ControllerImage = fmt.Sprintf("%s/controller", options.dockerRegistry)
 	if options.controlPlaneVersion != version.Version {
 		values.Global.ControllerImageVersion = options.controlPlaneVersion
@@ -759,11 +672,8 @@ func (options *installOptions) applyToValues(values *l5dcharts.Values) {
 	values.Global.HighAvailability = options.highAvailability
 	values.Global.ImagePullPolicy = options.imagePullPolicy
 	values.Global.Namespace = controlPlaneNamespace
-	values.Global.CNIEnabled = options.cniEnabled
 	values.Global.EnableEndpointSlices = options.enableEndpointSlices
 	values.OmitWebhookSideEffects = options.omitWebhookSideEffects
-	values.HeartbeatSchedule = options.heartbeatSchedule()
-	values.RestrictDashboardPrivileges = options.restrictDashboardPrivileges
 	values.DisableHeartBeat = options.disableHeartbeat
 	values.WebImage = fmt.Sprintf("%s/web", options.dockerRegistry)
 	if options.dockerRegistry != "gcr.io/linkerd-io" {
@@ -818,79 +728,53 @@ func (options *installOptions) applyToValues(values *l5dcharts.Values) {
 	values.DebugContainer.Image.Name = registryOverride(options.debugImage, options.dockerRegistry)
 	values.DebugContainer.Image.PullPolicy = options.imagePullPolicy
 	values.DebugContainer.Image.Version = options.debugImageVersion
-}
-
-// buildValuesWithoutIdentity builds the values that will be used to render
-// the Helm templates. It overrides the defaults values with CLI options.
-func (options *installOptions) buildValuesWithoutIdentity(configs *pb.All) (*l5dcharts.Values, error) {
-	installValues, err := l5dcharts.NewValues(options.highAvailability)
-	if err != nil {
-		return nil, err
-	}
 
 	if options.highAvailability {
+		haValues, err := l5dcharts.NewValues(true)
+		if err != nil {
+			return err
+		}
 		// use the HA defaults if CLI options aren't provided
 		if options.controllerReplicas == 1 {
-			options.controllerReplicas = installValues.ControllerReplicas
+			values.ControllerReplicas = haValues.ControllerReplicas
 		}
 
 		if options.proxyCPURequest == "" {
-			options.proxyCPURequest = installValues.Global.Proxy.Resources.CPU.Request
+			values.Global.Proxy.Resources.CPU.Request = haValues.Global.Proxy.Resources.CPU.Request
 		}
 
 		if options.proxyMemoryRequest == "" {
-			options.proxyMemoryRequest = installValues.Global.Proxy.Resources.Memory.Request
+			values.Global.Proxy.Resources.Memory.Request = haValues.Global.Proxy.Resources.Memory.Request
 		}
 
 		if options.proxyCPULimit == "" {
-			options.proxyCPULimit = installValues.Global.Proxy.Resources.CPU.Limit
+			values.Global.Proxy.Resources.CPU.Limit = haValues.Global.Proxy.Resources.CPU.Limit
 		}
 
 		if options.proxyMemoryLimit == "" {
-			options.proxyMemoryLimit = installValues.Global.Proxy.Resources.Memory.Limit
+			values.Global.Proxy.Resources.Memory.Limit = haValues.Global.Proxy.Resources.Memory.Limit
 		}
-
-		if configs != nil {
-			// `configs` was built before the HA option is evaluated, so we need
-			// to make sure the HA proxy resources are added here.
-			if configs.Proxy.Resource.RequestCpu == "" {
-				configs.Proxy.Resource.RequestCpu = options.proxyCPURequest
-			}
-
-			if configs.Proxy.Resource.RequestMemory == "" {
-				configs.Proxy.Resource.RequestMemory = options.proxyMemoryRequest
-			}
-
-			if configs.Proxy.Resource.LimitCpu == "" {
-				configs.Proxy.Resource.LimitCpu = options.proxyCPULimit
-			}
-
-			if configs.Proxy.Resource.LimitMemory == "" {
-				configs.Proxy.Resource.LimitMemory = options.proxyMemoryLimit
-			}
-		}
-
-		options.identityOptions.replicas = options.controllerReplicas
 	}
 
-	if configs != nil {
-		globalJSON, proxyJSON, installJSON, err := config.ToJSON(configs)
-		if err != nil {
-			return nil, err
-		}
+	// Some of the heartbeat Prometheus queries rely on 5m resolution, which
+	// means at least 5 minutes of data available. Start the first CronJob 10
+	// minutes after `linkerd install` is run, to give the user 5 minutes to
+	// install.
+	t := time.Now().Add(10 * time.Minute).UTC()
+	values.HeartbeatSchedule = fmt.Sprintf("%d %d * * * ", t.Minute(), t.Hour())
 
-		installValues.Configs.Global = globalJSON
-		installValues.Configs.Proxy = proxyJSON
-		installValues.Configs.Install = installJSON
+	externallyManaged := values.Identity.Issuer.Scheme == string(corev1.SecretTypeTLS)
+	identity, err := options.identityOptions.validateAndBuild(externallyManaged, values.Global.IdentityTrustDomain)
+	if err != nil {
+		return err
 	}
+	values.Identity = identity.Identity
+	values.Global.IdentityTrustAnchorsPEM = identity.TrustAnchorsPEM
 
-	// override default values with CLI options
-	options.applyToValues(installValues)
-
-	return installValues, nil
+	return nil
 }
 
-func render(w io.Writer, values *l5dcharts.Values) error {
+func render(w io.Writer, values *l5dcharts.Values, stage string) error {
 	// Render raw values and create chart config
 	rawValues, err := yaml.Marshal(values)
 	if err != nil {
@@ -925,7 +809,7 @@ func render(w io.Writer, values *l5dcharts.Values) error {
 		}
 	}
 
-	if values.Stage == "" || values.Stage == configStage {
+	if stage == "" || stage == configStage {
 		for _, template := range templatesConfigStage {
 			files = append(files,
 				&chartutil.BufferedFile{Name: template},
@@ -938,7 +822,7 @@ func render(w io.Writer, values *l5dcharts.Values) error {
 		}
 	}
 
-	if values.Stage == "" || values.Stage == controlPlaneStage {
+	if stage == "" || stage == controlPlaneStage {
 		for _, template := range templatesControlPlaneStage {
 			files = append(files,
 				&chartutil.BufferedFile{Name: template},
@@ -987,90 +871,7 @@ func render(w io.Writer, values *l5dcharts.Values) error {
 	return err
 }
 
-func (options *installOptions) configs(identity *pb.IdentityContext) *pb.All {
-	return &pb.All{
-		Global:  options.globalConfig(identity),
-		Proxy:   options.proxyConfig(),
-		Install: options.installConfig(),
-	}
-}
-
-func (options *installOptions) globalConfig(identity *pb.IdentityContext) *pb.Global {
-	return &pb.Global{
-		LinkerdNamespace:       controlPlaneNamespace,
-		CniEnabled:             options.cniEnabled,
-		Version:                options.controlPlaneVersion,
-		IdentityContext:        identity,
-		OmitWebhookSideEffects: options.omitWebhookSideEffects,
-		ClusterDomain:          options.clusterDomain,
-	}
-}
-
-func (options *installOptions) installConfig() *pb.Install {
-	return &pb.Install{
-		CliVersion: version.Version,
-		Flags:      options.recordedFlags,
-	}
-}
-
-func (options *installOptions) proxyConfig() *pb.Proxy {
-	ignoreInboundPorts := []*pb.PortRange{}
-	for _, portOrRange := range options.ignoreInboundPorts {
-		ignoreInboundPorts = append(ignoreInboundPorts, &pb.PortRange{PortRange: portOrRange})
-	}
-
-	ignoreOutboundPorts := []*pb.PortRange{}
-	for _, portOrRange := range options.ignoreOutboundPorts {
-		ignoreOutboundPorts = append(ignoreOutboundPorts, &pb.PortRange{PortRange: portOrRange})
-	}
-
-	return &pb.Proxy{
-		ProxyImage: &pb.Image{
-			ImageName:  registryOverride(options.proxyImage, options.dockerRegistry),
-			PullPolicy: options.imagePullPolicy,
-		},
-		ProxyInitImage: &pb.Image{
-			ImageName:  registryOverride(options.initImage, options.dockerRegistry),
-			PullPolicy: options.imagePullPolicy,
-		},
-		ControlPort: &pb.Port{
-			Port: uint32(options.proxyControlPort),
-		},
-		IgnoreInboundPorts:  ignoreInboundPorts,
-		IgnoreOutboundPorts: ignoreOutboundPorts,
-		InboundPort: &pb.Port{
-			Port: uint32(options.proxyInboundPort),
-		},
-		AdminPort: &pb.Port{
-			Port: uint32(options.proxyAdminPort),
-		},
-		OutboundPort: &pb.Port{
-			Port: uint32(options.proxyOutboundPort),
-		},
-		Resource: &pb.ResourceRequirements{
-			RequestCpu:    options.proxyCPURequest,
-			RequestMemory: options.proxyMemoryRequest,
-			LimitCpu:      options.proxyCPULimit,
-			LimitMemory:   options.proxyMemoryLimit,
-		},
-		ProxyUid: options.proxyUID,
-		LogLevel: &pb.LogLevel{
-			Level: options.proxyLogLevel,
-		},
-		LogFormat:               options.proxyLogFormat,
-		DestinationGetNetworks:  strings.Join(options.destinationGetNetworks, ","),
-		DisableExternalProfiles: !options.enableExternalProfiles,
-		ProxyVersion:            options.proxyVersion,
-		ProxyInitImageVersion:   options.initImageVersion,
-		DebugImage: &pb.Image{
-			ImageName:  registryOverride(options.debugImage, options.dockerRegistry),
-			PullPolicy: options.imagePullPolicy,
-		},
-		DebugImageVersion: options.debugImageVersion,
-	}
-}
-
-func errAfterRunningChecks(options *installOptions) error {
+func errAfterRunningChecks(options *allStageOptions) error {
 	checks := []healthcheck.CategoryID{
 		healthcheck.KubernetesAPIChecks,
 		healthcheck.LinkerdPreInstallGlobalResourcesChecks,
@@ -1155,7 +956,7 @@ func checkFilesExist(files []string) error {
 	return nil
 }
 
-func (idopts *installIdentityOptions) validate() error {
+func (idopts *installIdentityOptions) validate(externallyManaged bool) error {
 	if idopts == nil {
 		return nil
 	}
@@ -1166,7 +967,7 @@ func (idopts *installIdentityOptions) validate() error {
 		}
 	}
 
-	if idopts.identityExternalIssuer {
+	if externallyManaged {
 
 		if idopts.crtPEMFile != "" {
 			return errors.New("--identity-issuer-certificate-file must not be specified if --identity-external-issuer=true")
@@ -1200,36 +1001,31 @@ func (idopts *installIdentityOptions) validate() error {
 	return nil
 }
 
-func (idopts *installIdentityOptions) validateAndBuild() (*identityWithAnchorsAndTrustDomain, error) {
+func (idopts *installIdentityOptions) validateAndBuild(externallyManaged bool, trustDomain string) (*identityWithAnchors, error) {
 	if idopts == nil {
 		return nil, nil
 	}
 
-	if err := idopts.validate(); err != nil {
-		return nil, err
-	}
-
-	if idopts.identityExternalIssuer {
-		return idopts.readExternallyManaged()
+	if externallyManaged {
+		return idopts.readExternallyManaged(trustDomain)
 	} else if idopts.trustPEMFile != "" && idopts.crtPEMFile != "" && idopts.keyPEMFile != "" {
-		return idopts.readValues()
+		return idopts.readValues(trustDomain)
 	} else {
-		return idopts.genValues()
+		return idopts.genValues(trustDomain)
 	}
 }
 
-func (idopts *installIdentityOptions) issuerName() string {
-	return fmt.Sprintf("identity.%s.%s", controlPlaneNamespace, idopts.trustDomain)
+func (idopts *installIdentityOptions) issuerName(trustDomain string) string {
+	return fmt.Sprintf("identity.%s.%s", controlPlaneNamespace, trustDomain)
 }
 
-func (idopts *installIdentityOptions) genValues() (*identityWithAnchorsAndTrustDomain, error) {
-	root, err := tls.GenerateRootCAWithDefaults(idopts.issuerName())
+func (idopts *installIdentityOptions) genValues(trustDomain string) (*identityWithAnchors, error) {
+	root, err := tls.GenerateRootCAWithDefaults(idopts.issuerName(trustDomain))
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate root certificate for identity: %s", err)
 	}
 
-	return &identityWithAnchorsAndTrustDomain{
-		TrustDomain:     idopts.trustDomain,
+	return &identityWithAnchors{
 		TrustAnchorsPEM: root.Cred.Crt.EncodeCertificatePEM(),
 		Identity: &l5dcharts.Identity{
 			Issuer: &l5dcharts.Issuer{
@@ -1247,7 +1043,7 @@ func (idopts *installIdentityOptions) genValues() (*identityWithAnchorsAndTrustD
 	}, nil
 }
 
-func (idopts *installIdentityOptions) readExternallyManaged() (*identityWithAnchorsAndTrustDomain, error) {
+func (idopts *installIdentityOptions) readExternallyManaged(trustDomain string) (*identityWithAnchors, error) {
 
 	kubeAPI, err := k8s.NewAPI(kubeconfigPath, kubeContext, impersonate, impersonateGroup, 0)
 	if err != nil {
@@ -1258,13 +1054,12 @@ func (idopts *installIdentityOptions) readExternallyManaged() (*identityWithAnch
 	if err != nil {
 		return nil, err
 	}
-	_, err = externalIssuerData.VerifyAndBuildCreds(idopts.issuerName())
+	_, err = externalIssuerData.VerifyAndBuildCreds(idopts.issuerName(trustDomain))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read CA from %s: %s", consts.IdentityIssuerSecretName, err)
 	}
 
-	return &identityWithAnchorsAndTrustDomain{
-		TrustDomain:     idopts.trustDomain,
+	return &identityWithAnchors{
 		TrustAnchorsPEM: externalIssuerData.TrustAnchors,
 		Identity: &l5dcharts.Identity{
 			Issuer: &l5dcharts.Issuer{
@@ -1281,19 +1076,18 @@ func (idopts *installIdentityOptions) readExternallyManaged() (*identityWithAnch
 // to produce an `installIdentityValues`.
 //
 // The identity options must have already been validated.
-func (idopts *installIdentityOptions) readValues() (*identityWithAnchorsAndTrustDomain, error) {
+func (idopts *installIdentityOptions) readValues(trustDomain string) (*identityWithAnchors, error) {
 	issuerData, err := issuercerts.LoadIssuerDataFromFiles(idopts.keyPEMFile, idopts.crtPEMFile, idopts.trustPEMFile)
 	if err != nil {
 		return nil, err
 	}
 
-	creds, err := issuerData.VerifyAndBuildCreds(idopts.issuerName())
+	creds, err := issuerData.VerifyAndBuildCreds(idopts.issuerName(trustDomain))
 	if err != nil {
 		return nil, fmt.Errorf("failed to verify issuer certs stored on disk: %s", err)
 	}
 
-	return &identityWithAnchorsAndTrustDomain{
-		TrustDomain:     idopts.trustDomain,
+	return &identityWithAnchors{
 		TrustAnchorsPEM: issuerData.TrustAnchors,
 		Identity: &l5dcharts.Identity{
 			Issuer: &l5dcharts.Issuer{
@@ -1309,28 +1103,4 @@ func (idopts *installIdentityOptions) readValues() (*identityWithAnchorsAndTrust
 			},
 		},
 	}, nil
-}
-
-func toIdentityContext(idvals *identityWithAnchorsAndTrustDomain) *pb.IdentityContext {
-	if idvals == nil {
-		return nil
-	}
-
-	il, err := time.ParseDuration(idvals.Identity.Issuer.IssuanceLifetime)
-	if err != nil {
-		il = defaultIdentityIssuanceLifetime
-	}
-
-	csa, err := time.ParseDuration(idvals.Identity.Issuer.ClockSkewAllowance)
-	if err != nil {
-		csa = defaultIdentityClockSkewAllowance
-	}
-
-	return &pb.IdentityContext{
-		TrustDomain:        idvals.TrustDomain,
-		TrustAnchorsPem:    idvals.TrustAnchorsPEM,
-		IssuanceLifetime:   ptypes.DurationProto(il),
-		ClockSkewAllowance: ptypes.DurationProto(csa),
-		Scheme:             idvals.Identity.Issuer.Scheme,
-	}
 }

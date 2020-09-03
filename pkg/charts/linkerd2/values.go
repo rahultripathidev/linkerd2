@@ -19,7 +19,6 @@ const (
 type (
 	// Values contains the top-level elements in the Helm charts
 	Values struct {
-		Stage                       string            `json:"stage"`
 		ControllerImage             string            `json:"controllerImage"`
 		ControllerImageVersion      string            `json:"controllerImageVersion"`
 		WebImage                    string            `json:"webImage"`
