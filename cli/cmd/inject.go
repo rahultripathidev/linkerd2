@@ -122,7 +122,7 @@ sub-folders, or coming from stdin.`,
 	)
 
 	flags.BoolVar(
-		&options.ignoreCluster, "ignore-cluster", options.ignoreCluster,
+		&ignoreCluster, "ignore-cluster", false,
 		"Ignore the current Kubernetes cluster when checking for existing cluster configuration (default false)",
 	)
 
@@ -337,17 +337,12 @@ func (resourceTransformerInject) generateReport(reports []inject.Report, output 
 }
 
 func (options *proxyConfigOptions) fetchConfigsOrDefault() (*cfg.All, error) {
-	if options.ignoreCluster {
+	if ignoreCluster {
 		if !options.disableIdentity {
 			return nil, errors.New("--disable-identity must be set with --ignore-cluster")
 		}
 
-		install, err := newInstallOptionsWithDefaults()
-		if err != nil {
-			return nil, err
-		}
-
-		return install.configs(nil), nil
+		return nil, nil
 	}
 
 	api := checkPublicAPIClientOrExit()

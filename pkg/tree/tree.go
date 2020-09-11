@@ -8,6 +8,25 @@ import (
 // yaml or json.
 type Tree map[string]interface{}
 
+func (t Tree) Get(path []string) (interface{}, bool) {
+	if len(path) == 0 {
+		return nil, false
+	}
+	if len(path) == 1 {
+		value, ok := t[path[0]]
+		return value, ok
+	}
+	value, ok := t[path[0]]
+	if !ok {
+		return nil, false
+	}
+	subtree, ok := value.(Tree)
+	if !ok {
+		return nil, false
+	}
+	return subtree.Get(path[1:])
+}
+
 // ToYAML returns a yaml serialization of the Tree.
 func (t Tree) ToYAML() (string, error) {
 	bytes, err := yaml.Marshal(t)
@@ -85,6 +104,43 @@ func (t Tree) Empty() bool {
 	return true
 }
 
+func (t Tree) Merge(other Tree) error {
+	for k, v := range other {
+		tv, exists := t[k]
+		if !exists {
+			// insert
+			t[k] = v
+		} else {
+			tvt, tvIsTree := tv.(Tree)
+			vt, vIsTree := v.(Tree)
+			if tvIsTree && vIsTree {
+				// merge
+				err := tvt.Merge(vt)
+				if err != nil {
+					return err
+				}
+			} else {
+				// override
+				t[k] = v
+			}
+		}
+	}
+	return nil
+}
+
+func (t Tree) MarshalOnto(obj interface{}) error {
+	s, err := t.ToYAML()
+	if err != nil {
+		return err
+	}
+
+	err = yaml.Unmarshal([]byte(s), obj)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 // MarshalToTree marshals obj to yaml and then parses the resulting yaml as
 // as Tree.
 func MarshalToTree(obj interface{}) (Tree, error) {
@@ -99,6 +155,18 @@ func MarshalToTree(obj interface{}) (Tree, error) {
 	}
 	tree.coerceToTree()
 	return tree, nil
+}
+
+func MarsahlToDiff(base, other interface{}) (Tree, error) {
+	baseTree, err := MarshalToTree(base)
+	if err != nil {
+		return nil, err
+	}
+	otherTree, err := MarshalToTree(other)
+	if err != nil {
+		return nil, err
+	}
+	return baseTree.Diff(otherTree)
 }
 
 // coerceToTree recursively casts all instances of map[string]interface{} into

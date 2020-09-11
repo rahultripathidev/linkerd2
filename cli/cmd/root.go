@@ -245,7 +245,6 @@ type proxyConfigOptions struct {
 	traceCollector                string
 	traceCollectorSvcAccount      string
 	waitBeforeExitSeconds         uint64
-	ignoreCluster                 bool // not validated by validate()
 	disableIdentity               bool
 	requireIdentityOnInboundPorts []string
 	disableTap                    bool
