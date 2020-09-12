@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/linkerd/linkerd2/controller/gen/config"
 	charts "github.com/linkerd/linkerd2/pkg/charts/linkerd2"
 )
 
@@ -17,46 +16,11 @@ const (
 )
 
 func TestRender(t *testing.T) {
-	defaultOptions, err := testInstallOptions()
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
-
-	defaultValues, _, err := defaultOptions.validateAndBuild("", nil)
-	if err != nil {
-		t.Fatalf("Unexpected error validating options: %v", err)
-	}
+	defaultValues, err := charts.NewValues(false)
 	addFakeTLSSecrets(defaultValues)
-
-	configValues, _, err := defaultOptions.validateAndBuild(configStage, nil)
-	if err != nil {
-		t.Fatalf("Unexpected error validating options: %v", err)
-	}
-	addFakeTLSSecrets(configValues)
-
-	controlPlaneValues, _, err := defaultOptions.validateAndBuild(controlPlaneStage, nil)
-	if err != nil {
-		t.Fatalf("Unexpected error validating options: %v", err)
-	}
 
 	// A configuration that shows that all config setting strings are honored
 	// by `render()`.
-	metaOptions, err := testInstallOptions()
-	if err != nil {
-		t.Fatalf("Unexpected error: %v\n", err)
-	}
-
-	identityContext := toIdentityContext(&identityWithAnchorsAndTrustDomain{
-		TrustAnchorsPEM: "test-trust-anchor",
-		Identity: &charts.Identity{
-			Issuer: &charts.Issuer{
-				ClockSkewAllowance: "20s",
-				IssuanceLifetime:   "86400s",
-			},
-		},
-	})
-	metaConfig := metaOptions.configs(identityContext)
-	metaConfig.Global.LinkerdNamespace = "Namespace"
 	metaValues := &charts.Values{
 		ControllerImage:             "ControllerImage",
 		WebImage:                    "WebImage",
@@ -149,111 +113,85 @@ func TestRender(t *testing.T) {
 		Grafana: defaultValues.Grafana,
 	}
 
-	haOptions, err := testInstallOptions()
+	haValues, err := charts.NewValues(true)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v\n", err)
 	}
-
-	haOptions.recordedFlags = []*config.Install_Flag{{Name: "ha", Value: "true"}}
-	haOptions.highAvailability = true
-	haValues, _, _ := haOptions.validateAndBuild("", nil)
 	addFakeTLSSecrets(haValues)
 
-	haWithOverridesOptions, err := testInstallOptions()
+	haWithOverridesValues, err := charts.NewValues(true)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v\n", err)
 	}
 
-	haWithOverridesOptions.recordedFlags = []*config.Install_Flag{
-		{Name: "ha", Value: "true"},
-		{Name: "controller-replicas", Value: "2"},
-		{Name: "proxy-cpu-request", Value: "400m"},
-		{Name: "proxy-memory-request", Value: "300Mi"},
-	}
-	haWithOverridesOptions.highAvailability = true
-	haWithOverridesOptions.controllerReplicas = 2
-	haWithOverridesOptions.proxyCPURequest = "400m"
-	haWithOverridesOptions.proxyMemoryRequest = "300Mi"
-	haWithOverridesValues, _, _ := haWithOverridesOptions.validateAndBuild("", nil)
+	haWithOverridesValues.Global.HighAvailability = true
+	haWithOverridesValues.ControllerReplicas = 2
+	haWithOverridesValues.Global.Proxy.Resources.CPU.Request = "400m"
+	haWithOverridesValues.Global.Proxy.Resources.Memory.Request = "300Mi"
 	addFakeTLSSecrets(haWithOverridesValues)
 
-	cniEnabledOptions, err := testInstallOptions()
+	cniEnabledValues, err := charts.NewValues(false)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v\n", err)
 	}
 
-	cniEnabledOptions.recordedFlags = []*config.Install_Flag{{Name: "linkerd-cni-enabled", Value: "true"}}
-	cniEnabledOptions.cniEnabled = true
-	cniEnabledValues, _, _ := cniEnabledOptions.validateAndBuild("", nil)
+	cniEnabledValues.Global.CNIEnabled = true
 	addFakeTLSSecrets(cniEnabledValues)
 
-	withProxyIgnoresOptions, err := testInstallOptions()
+	withProxyIgnoresValues, err := charts.NewValues(false)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v\n", err)
 	}
-	withProxyIgnoresOptions.ignoreInboundPorts = []string{"22", "8100-8102"}
-	withProxyIgnoresOptions.ignoreOutboundPorts = []string{"5432"}
-	withProxyIgnoresValues, _, _ := withProxyIgnoresOptions.validateAndBuild("", nil)
+	withProxyIgnoresValues.Global.ProxyInit.IgnoreInboundPorts = "22,8100-8102"
+	withProxyIgnoresValues.Global.ProxyInit.IgnoreOutboundPorts = "5432"
 	addFakeTLSSecrets(withProxyIgnoresValues)
 
-	withHeartBeatDisabled, err := testInstallOptions()
+	withHeartBeatDisabledValues, err := charts.NewValues(false)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v\n", err)
 	}
-	withHeartBeatDisabled.disableHeartbeat = true
-	withHeartBeatDisabledValues, _, _ := withHeartBeatDisabled.validateAndBuild("", nil)
+	withHeartBeatDisabledValues.DisableHeartBeat = true
 	addFakeTLSSecrets(withHeartBeatDisabledValues)
 
-	withRestrictedDashboardPrivileges, err := testInstallOptions()
+	withRestrictedDashboardPrivilegesValues, err := charts.NewValues(false)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v\n", err)
 	}
-	withRestrictedDashboardPrivileges.restrictDashboardPrivileges = true
-	withRestrictedDashboardPrivilegesValues, _, _ := withRestrictedDashboardPrivileges.validateAndBuild("", nil)
+	withRestrictedDashboardPrivilegesValues.RestrictDashboardPrivileges = true
 	addFakeTLSSecrets(withRestrictedDashboardPrivilegesValues)
 
-	withControlPlaneTracing, err := testInstallOptions()
+	withControlPlaneTracingValues, err := charts.NewValues(false)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v\n", err)
 	}
-	withControlPlaneTracing.controlPlaneTracing = true
-	withControlPlaneTracingValues, _, _ := withControlPlaneTracing.validateAndBuild("", nil)
+	withControlPlaneTracingValues.Global.ControlPlaneTracing = true
 	addFakeTLSSecrets(withControlPlaneTracingValues)
 
 	customRegistryOverride := "my.custom.registry/linkerd-io"
-	withCustomRegistryOptions, err := testInstallOptions()
+	withCustomRegistryValues, err := charts.NewValues(false)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v\n", err)
 	}
-	withCustomRegistryOptions.dockerRegistry = customRegistryOverride
-	withCustomRegistryOptions.recordedFlags = []*config.Install_Flag{
-		{Name: "registry", Value: customRegistryOverride},
+	_, options, err := makeInstallUpgradeFlags(withCustomRegistryValues)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v\n", err)
 	}
-	withCustomRegistryValues, _, _ := withCustomRegistryOptions.validateAndBuild("", nil)
+	options.dockerRegistry = customRegistryOverride
+	err = options.applyToValues(withCustomRegistryValues)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v\n", err)
+	}
 	addFakeTLSSecrets(withCustomRegistryValues)
 
-	withAddOnConfigStage, err := testInstallOptions()
-	if err != nil {
-		t.Fatalf("Unexpected error: %v\n", err)
-	}
-	withAddOnConfigStageValues, _, _ := withAddOnConfigStage.validateAndBuild(configStage, nil)
-	withAddOnConfigStageValues.Tracing["enabled"] = true
-	addFakeTLSSecrets(withAddOnConfigStageValues)
+	withAddOnValues, err := charts.NewValues(false)
+	withAddOnValues.Tracing["enabled"] = true
+	addFakeTLSSecrets(withAddOnValues)
 
-	withAddOnControlPlaneStage, err := testInstallOptions()
+	withCustomDestinationGetNetsValues, err := charts.NewValues(false)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v\n", err)
 	}
-	withAddOnControlPlaneStageValues, _, _ := withAddOnControlPlaneStage.validateAndBuild(controlPlaneStage, nil)
-	withAddOnControlPlaneStageValues.Tracing["enabled"] = true
-	addFakeTLSSecrets(withAddOnControlPlaneStageValues)
-
-	withCustomDestinationGetNets, err := testInstallOptions()
-	if err != nil {
-		t.Fatalf("Unexpected error: %v\n", err)
-	}
-	withCustomDestinationGetNets.destinationGetNetworks = []string{"10.0.0.0/8", "172.0.0.0/8"}
-	withCustomDestinationGetNetsValues, _, _ := withCustomDestinationGetNets.validateAndBuild("", nil)
+	withCustomDestinationGetNetsValues.Global.Proxy.DestinationGetNetworks = "10.0.0.0/8,172.0.0.0/8"
 	addFakeTLSSecrets(withCustomDestinationGetNetsValues)
 
 	testCases := []struct {
@@ -261,8 +199,6 @@ func TestRender(t *testing.T) {
 		goldenFileName string
 	}{
 		{defaultValues, "install_default.golden"},
-		{configValues, "install_config.golden"},
-		{controlPlaneValues, "install_control-plane.golden"},
 		{metaValues, "install_output.golden"},
 		{haValues, "install_ha_output.golden"},
 		{haWithOverridesValues, "install_ha_with_overrides_output.golden"},
@@ -272,8 +208,7 @@ func TestRender(t *testing.T) {
 		{withRestrictedDashboardPrivilegesValues, "install_restricted_dashboard.golden"},
 		{withControlPlaneTracingValues, "install_controlplane_tracing_output.golden"},
 		{withCustomRegistryValues, "install_custom_registry.golden"},
-		{withAddOnConfigStageValues, "install_addon_config.golden"},
-		{withAddOnControlPlaneStageValues, "install_addon_control-plane.golden"},
+		{withAddOnValues, "install_addon.golden"},
 		{withCustomDestinationGetNetsValues, "install_default_override_dst_get_nets.golden"},
 	}
 
@@ -281,7 +216,7 @@ func TestRender(t *testing.T) {
 		tc := tc // pin
 		t.Run(fmt.Sprintf("%d: %s", i, tc.goldenFileName), func(t *testing.T) {
 			var buf bytes.Buffer
-			if err := render(&buf, tc.values); err != nil {
+			if err := render(&buf, tc.values, ""); err != nil {
 				t.Fatalf("Failed to render templates: %v", err)
 			}
 			diffTestdata(t, tc.goldenFileName, buf.String())
@@ -296,7 +231,7 @@ func TestValidateAndBuild_Errors(t *testing.T) {
 			t.Fatalf("Unexpected error: %v\n", err)
 		}
 		installOptions.ignoreInboundPorts = []string{"-25"}
-		_, _, err = installOptions.validateAndBuild("", nil)
+		err = installOptions.validate()
 		if err == nil {
 			t.Fatal("expected error but got nothing")
 		}
@@ -308,24 +243,26 @@ func TestValidateAndBuild_Errors(t *testing.T) {
 			t.Fatalf("Unexpected error: %v\n", err)
 		}
 		installOptions.ignoreOutboundPorts = []string{"-25"}
-		_, _, err = installOptions.validateAndBuild("", nil)
+		err = installOptions.validate()
 		if err == nil {
 			t.Fatal("expected error but got nothing")
 		}
 	})
 }
 
-func testInstallOptions() (*installOptions, error) {
-	o, err := newInstallOptionsWithDefaults()
+func testInstallOptions() (*installUpgradeOptions, error) {
+	defaults, err := charts.NewValues(false)
+	if err != nil {
+		return nil, err
+	}
+	_, o, err := makeInstallUpgradeFlags(defaults)
 	if err != nil {
 		return nil, err
 	}
 
-	o.ignoreCluster = true
 	o.proxyVersion = installProxyVersion
 	o.debugImageVersion = installDebugVersion
 	o.controlPlaneVersion = installControlPlaneVersion
-	o.heartbeatSchedule = fakeHeartbeatSchedule
 	o.identityOptions.crtPEMFile = filepath.Join("testdata", "valid-crt.pem")
 	o.identityOptions.keyPEMFile = filepath.Join("testdata", "valid-key.pem")
 	o.identityOptions.trustPEMFile = filepath.Join("testdata", "valid-trust-anchors.pem")
@@ -444,7 +381,7 @@ func TestValidate(t *testing.T) {
 			options.identityOptions.keyPEMFile = filepath.Join("testdata", tc.crtFilePrefix+"-key.pem")
 			options.identityOptions.trustPEMFile = filepath.Join("testdata", tc.crtFilePrefix+"-trust-anchors.pem")
 
-			_, err = options.identityOptions.validateAndBuild()
+			err = options.identityOptions.validate(false, "cluster.local")
 
 			if tc.expectedError != "" {
 				if err == nil {
@@ -473,7 +410,6 @@ func TestValidate(t *testing.T) {
 		}
 
 		withoutCertDataOptions := options.identityOptions
-		withoutCertDataOptions.identityExternalIssuer = true
 		withCrtFile := *withoutCertDataOptions
 		withCrtFile.crtPEMFile = "crt-file"
 		withTrustAnchorsFile := *withoutCertDataOptions
@@ -492,7 +428,7 @@ func TestValidate(t *testing.T) {
 		}
 
 		for _, tc := range testCases {
-			err = tc.input.validate()
+			err = tc.input.validate(true, "cluster.local")
 
 			if tc.expectedError != "" {
 				if err == nil {

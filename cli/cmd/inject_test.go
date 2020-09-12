@@ -66,11 +66,12 @@ func testInstallConfig() *pb.All {
 		log.Fatalf("Unexpected error: %v", err)
 	}
 
-	_, c, err := installOptions.validateAndBuild("", nil)
+	err = installOptions.validate()
 	if err != nil {
 		log.Fatalf("test install options must be valid: %s", err)
 	}
-	return c
+	// TODO: create default inject config
+	return nil
 }
 
 func TestUninjectAndInject(t *testing.T) {
@@ -103,16 +104,9 @@ func TestUninjectAndInject(t *testing.T) {
 	cniEnabledConfig.Proxy.ProxyVersion = defaultConfig.Proxy.ProxyVersion
 	cniEnabledConfig.Global.CniEnabled = true
 
-	proxyIgnorePortsOptions, err := testInstallOptions()
-	if err != nil {
-		log.Fatalf("Unexpected error: %v", err)
-	}
-	proxyIgnorePortsOptions.ignoreInboundPorts = []string{"22", "8100-8102"}
-	proxyIgnorePortsOptions.ignoreOutboundPorts = []string{"5432"}
-	_, proxyIgnorePortsConfig, err := proxyIgnorePortsOptions.validateAndBuild("", nil)
-	if err != nil {
-		log.Fatalf("test install proxy-ignore options must be valid: %s", err)
-	}
+	proxyIgnorePortsConfig := testInstallConfig()
+	proxyIgnorePortsConfig.Proxy.IgnoreInboundPorts = toPortRanges([]string{"22", "8100-8102"})
+	proxyIgnorePortsConfig.Proxy.IgnoreOutboundPorts = toPortRanges([]string{"5432"})
 
 	testCases := []testCase{
 		{

@@ -12,37 +12,47 @@ import (
 )
 
 func TestAddOnRender(t *testing.T) {
-	withTracingAddon, err := testInstallOptions()
+	withTracingAddonValues, err := charts.NewValues(false)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v\n", err)
 	}
-
-	withTracingAddonValues, _, _ := withTracingAddon.validateAndBuild("", nil)
 	withTracingAddonValues.Tracing["enabled"] = true
 	addFakeTLSSecrets(withTracingAddonValues)
 
-	withTracingOverwrite, err := testInstallOptions()
+	withTracingOverwriteValues, err := charts.NewValues(false)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v\n", err)
 	}
+	_, withTracingOverwrite := makeAllStageFlags(withTracingOverwriteValues)
 	withTracingOverwrite.addOnConfig = filepath.Join("testdata", "addon_config_overwrite.yaml")
-	withTracingOverwriteValues, _, _ := withTracingOverwrite.validateAndBuild("", nil)
+	err = withTracingOverwrite.applyToValues(withTracingOverwriteValues)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v\n", err)
+	}
 	addFakeTLSSecrets(withTracingOverwriteValues)
 
-	withExistingGrafana, err := testInstallOptions()
+	withExistingGrafanaValues, err := charts.NewValues(false)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v\n", err)
 	}
+	_, withExistingGrafana := makeAllStageFlags(withExistingGrafanaValues)
 	withExistingGrafana.addOnConfig = filepath.Join("testdata", "existing-grafana-config.yaml")
-	withExistingGrafanaValues, _, _ := withExistingGrafana.validateAndBuild("", nil)
+	err = withExistingGrafana.applyToValues(withExistingGrafanaValues)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v\n", err)
+	}
 	addFakeTLSSecrets(withExistingGrafanaValues)
 
-	withPrometheusAddOnOverwrite, err := testInstallOptions()
+	withPrometheusAddOnOverwriteValues, err := charts.NewValues(false)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v\n", err)
 	}
+	_, withPrometheusAddOnOverwrite := makeAllStageFlags(withPrometheusAddOnOverwriteValues)
 	withPrometheusAddOnOverwrite.addOnConfig = filepath.Join("testdata", "prom-config.yaml")
-	withPrometheusAddOnOverwriteValues, _, _ := withPrometheusAddOnOverwrite.validateAndBuild("", nil)
+	err = withPrometheusAddOnOverwrite.applyToValues(withPrometheusAddOnOverwriteValues)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v\n", err)
+	}
 	addFakeTLSSecrets(withPrometheusAddOnOverwriteValues)
 
 	testCases := []struct {
@@ -59,7 +69,7 @@ func TestAddOnRender(t *testing.T) {
 		tc := tc // pin
 		t.Run(fmt.Sprintf("%d: %s", i, tc.goldenFileName), func(t *testing.T) {
 			var buf bytes.Buffer
-			if err := render(&buf, tc.values); err != nil {
+			if err := render(&buf, tc.values, ""); err != nil {
 				t.Fatalf("Failed to render templates: %v", err)
 			}
 			diffTestdata(t, tc.goldenFileName, buf.String())

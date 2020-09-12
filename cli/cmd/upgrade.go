@@ -193,6 +193,12 @@ func upgradeRunE(options *upgradeOptions, upgradeOverrides tree.Tree, stage stri
 		}
 	}
 
+	if options.addOnOverwrite {
+		values.Tracing = make(l5dcharts.Tracing)
+		values.Grafana = make(l5dcharts.Grafana)
+		values.Prometheus = make(l5dcharts.Prometheus)
+	}
+
 	err = upgradeOverrides.MarshalOnto(values)
 	if err != nil {
 		return err

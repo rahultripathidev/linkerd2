@@ -582,6 +582,22 @@ func (options *installUpgradeOptions) toOverrides() (tree.Tree, error) {
 	return defaultsTree.Diff(valuesTree)
 }
 
+func (options *allStageOptions) overrideValues(values *l5dcharts.Values) error {
+	overrides, err := options.toOverrides()
+	if err != nil {
+		return err
+	}
+	return overrides.MarshalOnto(values)
+}
+
+func (options *installUpgradeOptions) overrideValues(values *l5dcharts.Values) error {
+	overrides, err := options.toOverrides()
+	if err != nil {
+		return err
+	}
+	return overrides.MarshalOnto(values)
+}
+
 /* Identity */
 
 func (idopts *installIdentityOptions) issuerName(trustDomain string) string {
