@@ -16,7 +16,6 @@ func TestNewValues(t *testing.T) {
 	testVersion := "linkerd-dev"
 
 	expected := &Values{
-		Stage:                       "",
 		ControllerImage:             "gcr.io/linkerd-io/controller",
 		WebImage:                    "gcr.io/linkerd-io/web",
 		ControllerReplicas:          1,
