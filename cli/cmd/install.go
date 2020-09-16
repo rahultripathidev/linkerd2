@@ -118,7 +118,10 @@ resources for the Linkerd control plane. This command should be followed by
 				}
 			}
 
-			options.applyToValues(values)
+			err := options.applyToValues(values)
+			if err != nil {
+				return err
+			}
 
 			return render(os.Stdout, values, configStage)
 		},
@@ -164,8 +167,10 @@ control plane. It should be run after "linkerd install config".`,
 				}
 			}
 
+			var k8sAPI *k8s.KubernetesAPI
+
 			if !ignoreCluster {
-				k8sAPI, err := k8s.NewAPI(kubeconfigPath, kubeContext, impersonate, impersonateGroup, 30*time.Second)
+				k8sAPI, err = k8s.NewAPI(kubeconfigPath, kubeContext, impersonate, impersonateGroup, 30*time.Second)
 				if err != nil {
 					return err
 				}
@@ -184,8 +189,23 @@ control plane. It should be run after "linkerd install config".`,
 				}
 			}
 
-			allStageOptions.applyToValues(values)
-			installUpgradeOptions.applyToValues(values)
+			err = installUpgradeOptions.validate()
+			if err != nil {
+				return err
+			}
+
+			err = allStageOptions.applyToValues(values)
+			if err != nil {
+				return err
+			}
+			err = installUpgradeOptions.applyToValues(k8sAPI, values)
+			if err != nil {
+				return err
+			}
+			err = installUpgradeOptions.identityOptions.genValuesIfNecessary(values)
+			if err != nil {
+				return err
+			}
 
 			return render(os.Stdout, values, controlPlaneStage)
 		},
@@ -228,8 +248,9 @@ control plane.`,
   # Installation may also be broken up into two stages by user privilege, via
   # subcommands.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			var k8sAPI *k8s.KubernetesAPI
 			if !ignoreCluster {
-				k8sAPI, err := k8s.NewAPI(kubeconfigPath, kubeContext, impersonate, impersonateGroup, 30*time.Second)
+				k8sAPI, err = k8s.NewAPI(kubeconfigPath, kubeContext, impersonate, impersonateGroup, 30*time.Second)
 				if err != nil {
 					return err
 				}
@@ -248,8 +269,23 @@ control plane.`,
 				}
 			}
 
-			allStageOptions.applyToValues(values)
-			installUpgradeOptions.applyToValues(values)
+			err = installUpgradeOptions.validate()
+			if err != nil {
+				return err
+			}
+
+			err = allStageOptions.applyToValues(values)
+			if err != nil {
+				return err
+			}
+			err = installUpgradeOptions.applyToValues(k8sAPI, values)
+			if err != nil {
+				return err
+			}
+			err = installUpgradeOptions.identityOptions.genValuesIfNecessary(values)
+			if err != nil {
+				return err
+			}
 
 			return render(os.Stdout, values, "")
 		},

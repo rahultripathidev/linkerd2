@@ -11,6 +11,7 @@ import (
 	"github.com/linkerd/linkerd2/pkg/k8s"
 	"github.com/linkerd/linkerd2/pkg/tree"
 	"github.com/spf13/cobra"
+	corev1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
@@ -46,7 +47,11 @@ Note that this command should be followed by "linkerd upgrade control-plane".`,
 			if err != nil {
 				return err
 			}
-			return upgradeRunE(options, overrides, configStage)
+			k, err := k8sClient(options)
+			if err != nil {
+				return err
+			}
+			return upgradeRunE(k, options, overrides, configStage)
 		},
 	}
 
@@ -80,7 +85,12 @@ install command. It should be run after "linkerd upgrade config".`,
 			if err != nil {
 				return err
 			}
-			upgradeOverrides, err := installUpgradeOptions.toOverrides()
+
+			k, err := k8sClient(options)
+			if err != nil {
+				return err
+			}
+			upgradeOverrides, err := installUpgradeOptions.toOverrides(k)
 			if err != nil {
 				return err
 			}
@@ -88,7 +98,7 @@ install command. It should be run after "linkerd upgrade config".`,
 			if err != nil {
 				return err
 			}
-			return upgradeRunE(options, overrides, controlPlaneStage)
+			return upgradeRunE(k, options, overrides, controlPlaneStage)
 		},
 	}
 
@@ -129,11 +139,16 @@ install command.`,
   # Similar to install, upgrade may also be broken up into two stages, by user
   # privilege.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			k, err := k8sClient(options)
 			overrides, err := allStageOptions.toOverrides()
 			if err != nil {
 				return err
 			}
-			upgradeOverrides, err := installUpgradeOptions.toOverrides()
+			err = installUpgradeOptions.validate()
+			if err != nil {
+				return err
+			}
+			upgradeOverrides, err := installUpgradeOptions.toOverrides(k)
 			if err != nil {
 				return err
 			}
@@ -141,7 +156,7 @@ install command.`,
 			if err != nil {
 				return err
 			}
-			return upgradeRunE(options, overrides, "")
+			return upgradeRunE(k, options, overrides, "")
 		},
 	}
 
@@ -178,37 +193,11 @@ func k8sClient(options *upgradeOptions) (*k8s.KubernetesAPI, error) {
 	return k, nil
 }
 
-func upgradeRunE(options *upgradeOptions, upgradeOverrides tree.Tree, stage string) error {
+func upgradeRunE(k *k8s.KubernetesAPI, options *upgradeOptions, upgradeOverrides tree.Tree, stage string) error {
 
-	k, err := k8sClient(options)
+	buf, err := upgrade(k, options, upgradeOverrides, stage)
 	if err != nil {
 		return err
-	}
-
-	values, err := loadStoredValues(k)
-	if values == nil {
-		values, err = loadStoredValuesLegacy(k, options)
-		if err != nil {
-			return err
-		}
-	}
-
-	if options.addOnOverwrite {
-		values.Tracing = make(l5dcharts.Tracing)
-		values.Grafana = make(l5dcharts.Grafana)
-		values.Prometheus = make(l5dcharts.Prometheus)
-	}
-
-	err = upgradeOverrides.MarshalOnto(values)
-	if err != nil {
-		return err
-	}
-
-	// rendering to a buffer and printing full contents of buffer after
-	// render is complete, to ensure that okStatus prints separately
-	var buf bytes.Buffer
-	if err = render(&buf, values, stage); err != nil {
-		upgradeErrorf("Could not render upgrade configuration: %s", err)
 	}
 
 	if _, ok := upgradeOverrides.Get([]string{"global", "identityTrustAnchorsPEM"}); ok {
@@ -221,6 +210,42 @@ func upgradeRunE(options *upgradeOptions, upgradeOverrides tree.Tree, stage stri
 	buf.WriteTo(os.Stdout)
 
 	return nil
+}
+
+func upgrade(k *k8s.KubernetesAPI, options *upgradeOptions, upgradeOverrides tree.Tree, stage string) (bytes.Buffer, error) {
+	values, err := loadStoredValues(k)
+	if values == nil {
+		values, err = loadStoredValuesLegacy(k, options)
+		if err != nil {
+			return bytes.Buffer{}, err
+		}
+	}
+
+	if options.addOnOverwrite {
+		values.Tracing = make(l5dcharts.Tracing)
+		values.Grafana = make(l5dcharts.Grafana)
+		values.Prometheus = make(l5dcharts.Prometheus)
+	}
+
+	err = upgradeOverrides.MarshalOnto(values)
+	if err != nil {
+		return bytes.Buffer{}, err
+	}
+
+	if values.Identity.Issuer.Scheme == string(corev1.SecretTypeTLS) {
+		if _, ok := upgradeOverrides.Get([]string{"identity", "issuer", "tls"}); ok {
+			return bytes.Buffer{}, errors.New("cannot update issuer certificates if you are using external cert management solution")
+		}
+	}
+
+	// rendering to a buffer and printing full contents of buffer after
+	// render is complete, to ensure that okStatus prints separately
+	var buf bytes.Buffer
+	if err = render(&buf, values, stage); err != nil {
+		upgradeErrorf("Could not render upgrade configuration: %s", err)
+	}
+
+	return buf, nil
 }
 
 func loadStoredValues(k *k8s.KubernetesAPI) (*charts.Values, error) {

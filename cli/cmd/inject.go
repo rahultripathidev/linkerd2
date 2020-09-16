@@ -14,6 +14,7 @@ import (
 	jsonpatch "github.com/evanphx/json-patch"
 	cfg "github.com/linkerd/linkerd2/controller/gen/config"
 	"github.com/linkerd/linkerd2/controller/gen/public"
+	charts "github.com/linkerd/linkerd2/pkg/charts/linkerd2"
 	"github.com/linkerd/linkerd2/pkg/inject"
 	"github.com/linkerd/linkerd2/pkg/k8s"
 	log "github.com/sirupsen/logrus"
@@ -47,7 +48,12 @@ func runInjectCmd(inputs []io.Reader, errWriter, outWriter io.Writer, transforme
 }
 
 func newCmdInject() *cobra.Command {
-	options := &proxyConfigOptions{}
+	values, err := charts.NewValues(false)
+	if err != nil {
+		fmt.Fprint(os.Stderr, err.Error())
+		os.Exit(1)
+	}
+	flags, options := makeProxyFlags(pflag.ExitOnError, values)
 	var manualOption, enableDebugSidecar bool
 	var closeWaitTimeout time.Duration
 
@@ -101,7 +107,6 @@ sub-folders, or coming from stdin.`,
 		},
 	}
 
-	flags := options.flagSet(pflag.ExitOnError)
 	flags.BoolVar(
 		&manualOption, "manual", manualOption,
 		"Include the proxy sidecar container spec in the YAML output (the auto-injector won't pick it up, so config annotations aren't supported) (default false)",

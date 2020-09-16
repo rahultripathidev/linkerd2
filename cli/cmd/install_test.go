@@ -177,7 +177,7 @@ func TestRender(t *testing.T) {
 		t.Fatalf("Unexpected error: %v\n", err)
 	}
 	options.dockerRegistry = customRegistryOverride
-	err = options.applyToValues(withCustomRegistryValues)
+	err = options.applyToValues(nil, withCustomRegistryValues)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v\n", err)
 	}

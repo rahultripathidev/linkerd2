@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -101,7 +102,7 @@ func TestUpgradeExternalIssuer(t *testing.T) {
 	}
 	values.Global.IdentityTrustAnchorsPEM = issuer.ca
 	install := renderInstall(t, values)
-	upgrade, err := renderUpgrade(t, install.String()+externalIssuerSecret(issuer), upgradeOpts, nil, false)
+	upgrade, err := renderUpgrade(install.String()+externalIssuerSecret(issuer), upgradeOpts, nil, false)
 
 	if err != nil {
 		t.Fatal(err)
@@ -141,7 +142,7 @@ func TestUpgradeIssuerWithExternalIssuerFails(t *testing.T) {
 	upgradeOpts.identityOptions.crtPEMFile = upgradedIssuer.crtFile
 	upgradeOpts.identityOptions.keyPEMFile = upgradedIssuer.keyFile
 
-	_, err := renderUpgrade(t, install.String()+externalIssuerSecret(issuer), upgradeOpts, nil, false)
+	_, err := renderUpgrade(install.String()+externalIssuerSecret(issuer), upgradeOpts, nil, false)
 
 	expectedErr := "cannot update issuer certificates if you are using external cert management solution"
 
@@ -208,12 +209,11 @@ func TestUpgradeFailsWithOnlyIssuerCert(t *testing.T) {
 
 	issuerCerts := generateIssuerCerts(t, true)
 	defer issuerCerts.cleanup()
-	upgradeOpts.identityExternalIssuer = true
 	upgradeOpts.identityOptions.trustPEMFile = issuerCerts.caFile
 	upgradeOpts.identityOptions.crtPEMFile = issuerCerts.crtFile
 	_, _, err := renderInstallAndUpgrade(t, installOpts, upgradeOpts)
 
-	expectedErr := "a private key file must be specified if a certificate is provided"
+	expectedErr := "a private key file must be specified if other credentials are provided"
 
 	if err == nil || err.Error() != expectedErr {
 		t.Errorf("Expected error: %s but got %s", expectedErr, err)
@@ -225,12 +225,11 @@ func TestUpgradeFailsWithOnlyIssuerKey(t *testing.T) {
 
 	issuerCerts := generateIssuerCerts(t, true)
 	defer issuerCerts.cleanup()
-	upgradeOpts.identityExternalIssuer = true
 	upgradeOpts.identityOptions.trustPEMFile = issuerCerts.caFile
 	upgradeOpts.identityOptions.keyPEMFile = issuerCerts.keyFile
 	_, _, err := renderInstallAndUpgrade(t, installOpts, upgradeOpts)
 
-	expectedErr := "a certificate file must be specified if a private key is provided"
+	expectedErr := "a certificate file must be specified if other credentials are provided"
 
 	if err == nil || err.Error() != expectedErr {
 		t.Errorf("Expected error: %s but got %s", expectedErr, err)
@@ -250,7 +249,7 @@ func TestUpgradeRootFailsWithOldPods(t *testing.T) {
 	upgradeOpts.identityOptions.trustPEMFile = issuerCerts.caFile
 	upgradeOpts.identityOptions.keyPEMFile = issuerCerts.keyFile
 	upgradeOpts.identityOptions.crtPEMFile = issuerCerts.crtFile
-	_, err := renderUpgrade(t, install.String()+podWithSidecar(oldIssuer), upgradeOpts, nil, false)
+	_, err := renderUpgrade(install.String()+podWithSidecar(oldIssuer), upgradeOpts, nil, false)
 
 	expectedErr := "You are attempting to use an issuer certificate which does not validate against the trust anchors of the following pods"
 	if err == nil || !strings.HasPrefix(err.Error(), expectedErr) {
@@ -266,7 +265,7 @@ func TestUpgradeTracingAddon(t *testing.T) {
 	}
 
 	install := renderInstall(t, installValues(t, installOpts, nil))
-	upgrade, err := renderUpgrade(t, install.String(), upgradeOpts, allStageOptions, false)
+	upgrade, err := renderUpgrade(install.String(), upgradeOpts, allStageOptions, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +311,7 @@ func TestUpgradeOverwriteTracingAddon(t *testing.T) {
 	upgradeOpts.traceCollectorSvcAccount = "overwrite-collector.default"
 	installValues := installValues(t, installOpts, installAllStageOptions)
 	install := renderInstall(t, installValues)
-	upgrade, err := renderUpgrade(t, install.String(), upgradeOpts, upgradeAllStageOptions, false)
+	upgrade, err := renderUpgrade(install.String(), upgradeOpts, upgradeAllStageOptions, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -372,7 +371,7 @@ func TestUpgradeTwoLevelWebhookCrts(t *testing.T) {
 	}
 
 	install := renderInstall(t, values)
-	upgrade, err := renderUpgrade(t, install.String(), upgradeOpts, nil, false)
+	upgrade, err := renderUpgrade(install.String(), upgradeOpts, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -397,7 +396,7 @@ func TestUpgradeWithAddonDisabled(t *testing.T) {
 	}
 	installValues := installValues(t, installOpts, allStageOptions)
 	install := renderInstall(t, installValues)
-	upgrade, err := renderUpgrade(t, install.String(), upgradeOpts, nil, false)
+	upgrade, err := renderUpgrade(install.String(), upgradeOpts, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -426,7 +425,7 @@ func TestUpgradeEnableAddon(t *testing.T) {
 
 	installValues := installValues(t, installOpts, installAllStageOptions)
 	install := renderInstall(t, installValues)
-	upgrade, err := renderUpgrade(t, install.String(), upgradeOpts, upgradeAllStageOptions, false)
+	upgrade, err := renderUpgrade(install.String(), upgradeOpts, upgradeAllStageOptions, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -472,7 +471,7 @@ func TestUpgradeRemoveAddonKeys(t *testing.T) {
 	}
 	installValues := installValues(t, installOpts, installAllStageOptions)
 	install := renderInstall(t, installValues)
-	upgrade, err := renderUpgrade(t, install.String(), upgradeOpts, upgradeAllStageOptions, false)
+	upgrade, err := renderUpgrade(install.String(), upgradeOpts, upgradeAllStageOptions, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -502,7 +501,7 @@ func TestUpgradeOverwriteRemoveAddonKeys(t *testing.T) {
 	installValues := installValues(t, installOpts, installAllStageOptions)
 	install := renderInstall(t, installValues)
 
-	upgrade, err := renderUpgrade(t, install.String(), upgradeOpts, upgradeAllStageOptions, true)
+	upgrade, err := renderUpgrade(install.String(), upgradeOpts, upgradeAllStageOptions, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -566,7 +565,7 @@ func replaceVersions(manifest string) string {
 }
 
 func generateIssuerCerts(t *testing.T, b64encode bool) issuerCerts {
-	return generateCerts(t, "issuer", b64encode)
+	return generateCerts(t, "identity.linkerd.cluster.local", b64encode)
 }
 
 func generateCerts(t *testing.T, name string, b64encode bool) issuerCerts {
@@ -700,7 +699,7 @@ func installValues(t *testing.T, installOpts *installUpgradeOptions, allStageOpt
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
-	err = installOpts.applyToValues(installValues)
+	err = installOpts.applyToValues(nil, installValues)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -722,48 +721,51 @@ func renderInstall(t *testing.T, values *linkerd2.Values) bytes.Buffer {
 	return installBuf
 }
 
-func renderUpgrade(t *testing.T, installManifest string, upgradeOpts *installUpgradeOptions, allStageOptions *allStageOptions, addonOverride bool) (bytes.Buffer, error) {
-	manifests := splitManifests(installManifest)
-	clientset, err := k8s.NewFakeAPI(manifests...)
+func renderUpgrade(installManifest string, upgradeOpts *installUpgradeOptions, allStageOptions *allStageOptions, addonOverride bool) (bytes.Buffer, error) {
+	err := upgradeOpts.validate()
 	if err != nil {
-		t.Fatalf("could not initialize fake k8s API: %s", err)
+		return bytes.Buffer{}, err
 	}
-
-	values, err := loadStoredValues(clientset)
+	k, err := k8s.NewFakeAPIFromManifests([]io.Reader{strings.NewReader(installManifest)})
 	if err != nil {
-		return bytes.Buffer{}, fmt.Errorf("Failed to load stored values: %s", err)
+		return bytes.Buffer{}, err
 	}
 
-	if addonOverride {
-		values.Tracing = make(charts.Tracing)
-		values.Prometheus = make(charts.Prometheus)
-		values.Grafana = make(charts.Grafana)
-	}
-
-	err = upgradeOpts.overrideValues(values)
+	upgradeOverrides, err := upgradeOpts.toOverrides(k)
 	if err != nil {
-		return bytes.Buffer{}, fmt.Errorf("Failed to process upgrade flags: %s", err)
+		return bytes.Buffer{}, err
 	}
-
 	if allStageOptions != nil {
-		err = allStageOptions.overrideValues(values)
+		allStageOverrides, err := allStageOptions.toOverrides()
 		if err != nil {
-			return bytes.Buffer{}, fmt.Errorf("Failed to process upgrade flags: %s", err)
+			return bytes.Buffer{}, err
 		}
+
+		fmt.Println("All stage overrides")
+		fmt.Println(allStageOverrides.String())
+
+		err = upgradeOverrides.Merge(allStageOverrides)
+		if err != nil {
+			return bytes.Buffer{}, err
+		}
+
+		fmt.Println("merged overrides")
+		fmt.Println(upgradeOverrides.String())
 	}
 
-	var upgradeBuf bytes.Buffer
-	err = render(&upgradeBuf, values, "")
-	if err != nil {
-		t.Fatalf("could not render upgrade configuration: %s", err)
+	options := upgradeOptions{
+		addOnOverwrite: addonOverride,
 	}
-
-	return upgradeBuf, nil
+	return upgrade(k, &options, upgradeOverrides, "")
 }
 
 func renderInstallAndUpgrade(t *testing.T, installOpts *installUpgradeOptions, upgradeOpts *installUpgradeOptions) (bytes.Buffer, bytes.Buffer, error) {
+	err := installOpts.validate()
+	if err != nil {
+		return bytes.Buffer{}, bytes.Buffer{}, err
+	}
 	installBuf := renderInstall(t, installValues(t, installOpts, nil))
-	upgradeBuf, err := renderUpgrade(t, installBuf.String(), upgradeOpts, nil, false)
+	upgradeBuf, err := renderUpgrade(installBuf.String(), upgradeOpts, nil, false)
 	return installBuf, upgradeBuf, err
 }
 

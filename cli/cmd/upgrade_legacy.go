@@ -49,29 +49,21 @@ func loadStoredValuesLegacy(k *k8s.KubernetesAPI, upgradeOptions *upgradeOptions
 	installUpgradeOptions.overrideConfigs(configs, map[string]string{})
 
 	err = allStageOptions.applyToValues(values)
-	err = installUpgradeOptions.applyToValues(values)
+	err = installUpgradeOptions.applyToValues(k, values)
 	if err != nil {
 		return nil, err
 	}
 
 	var identity *identityWithAnchors
 	idctx := configs.GetGlobal().GetIdentityContext()
-	if idctx.GetTrustDomain() == "" || idctx.GetTrustAnchorsPem() == "" {
-		// If there wasn't an idctx, or if it doesn't specify the required fields, we
-		// must be upgrading from a version that didn't support identity, so generate it anew...
-		identity, err = installUpgradeOptions.identityOptions.genValues(installUpgradeOptions.trustDomain)
-		if err != nil {
-			return nil, err
-		}
-	} else {
+	if idctx.GetTrustDomain() != "" && idctx.GetTrustAnchorsPem() != "" {
 		identity, err = fetchIdentityValues(k, upgradeOptions, installUpgradeOptions.identityOptions, idctx)
 		if err != nil {
 			return nil, err
 		}
+		values.Identity = identity.Identity
+		values.Global.IdentityTrustAnchorsPEM = identity.TrustAnchorsPEM
 	}
-
-	values.Identity = identity.Identity
-	values.Global.IdentityTrustAnchorsPEM = identity.TrustAnchorsPEM
 
 	if !upgradeOptions.addOnOverwrite {
 		// Update Add-Ons Configuration from the linkerd-value cm
