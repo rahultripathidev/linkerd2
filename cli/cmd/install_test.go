@@ -3,10 +3,14 @@ package cmd
 import (
 	"bytes"
 	"fmt"
+	"io/ioutil"
 	"path/filepath"
 	"testing"
 
+	"github.com/linkerd/linkerd2/cli/flag"
 	charts "github.com/linkerd/linkerd2/pkg/charts/linkerd2"
+	"github.com/linkerd/linkerd2/pkg/tls"
+	corev1 "k8s.io/api/core/v1"
 )
 
 const (
@@ -172,12 +176,12 @@ func TestRender(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Unexpected error: %v\n", err)
 	}
-	_, options, err := makeInstallUpgradeFlags(withCustomRegistryValues)
+	flags, flagSet, err := makeInstallUpgradeFlags(withCustomRegistryValues)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v\n", err)
 	}
-	options.dockerRegistry = customRegistryOverride
-	err = options.applyToValues(nil, withCustomRegistryValues)
+	flagSet.Set("docker-registry", customRegistryOverride)
+	err = flag.ApplySetFlags(withCustomRegistryValues, flags)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v\n", err)
 	}
@@ -226,71 +230,91 @@ func TestRender(t *testing.T) {
 
 func TestValidateAndBuild_Errors(t *testing.T) {
 	t.Run("Fails validation for invalid ignoreInboundPorts", func(t *testing.T) {
-		installOptions, err := testInstallOptions()
+		values, err := testInstallOptions()
 		if err != nil {
 			t.Fatalf("Unexpected error: %v\n", err)
 		}
-		installOptions.ignoreInboundPorts = []string{"-25"}
-		err = installOptions.validate()
+		values.Global.ProxyInit.IgnoreInboundPorts = "-25"
+		err = validateValues(nil, values)
 		if err == nil {
 			t.Fatal("expected error but got nothing")
 		}
 	})
 
 	t.Run("Fails validation for invalid ignoreOutboundPorts", func(t *testing.T) {
-		installOptions, err := testInstallOptions()
+		values, err := testInstallOptions()
 		if err != nil {
 			t.Fatalf("Unexpected error: %v\n", err)
 		}
-		installOptions.ignoreOutboundPorts = []string{"-25"}
-		err = installOptions.validate()
+		values.Global.ProxyInit.IgnoreOutboundPorts = "-25"
+		err = validateValues(nil, values)
 		if err == nil {
 			t.Fatal("expected error but got nothing")
 		}
 	})
 }
 
-func testInstallOptions() (*installUpgradeOptions, error) {
-	defaults, err := charts.NewValues(false)
-	if err != nil {
-		return nil, err
-	}
-	_, o, err := makeInstallUpgradeFlags(defaults)
+func testInstallOptions() (*charts.Values, error) {
+	values, err := charts.NewValues(false)
 	if err != nil {
 		return nil, err
 	}
 
-	o.proxyVersion = installProxyVersion
-	o.debugImageVersion = installDebugVersion
-	o.controlPlaneVersion = installControlPlaneVersion
-	o.identityOptions.crtPEMFile = filepath.Join("testdata", "valid-crt.pem")
-	o.identityOptions.keyPEMFile = filepath.Join("testdata", "valid-key.pem")
-	o.identityOptions.trustPEMFile = filepath.Join("testdata", "valid-trust-anchors.pem")
-	return o, nil
+	values.Global.Proxy.Image.Version = installProxyVersion
+	values.DebugContainer.Image.Version = installDebugVersion
+	values.ControllerImageVersion = installControlPlaneVersion
+	values.Global.ControllerImageVersion = installControlPlaneVersion
+	values.HeartbeatSchedule = fakeHeartbeatSchedule()
+
+	data, err := ioutil.ReadFile(filepath.Join("testdata", "valid-crt.pem"))
+	if err != nil {
+		return nil, err
+	}
+
+	crt, err := tls.DecodePEMCrt(string(data))
+	if err != nil {
+		return nil, err
+	}
+	values.Identity.Issuer.TLS.CrtPEM = crt.EncodeCertificatePEM()
+	values.Identity.Issuer.CrtExpiry = crt.Certificate.NotAfter
+
+	key, err := loadKeyPEM(filepath.Join("testdata", "valid-key.pem"))
+	if err != nil {
+		return nil, err
+	}
+	values.Identity.Issuer.TLS.KeyPEM = key
+
+	data, err = ioutil.ReadFile(filepath.Join("testdata", "valid-trust-anchors.pem"))
+	if err != nil {
+		return nil, err
+	}
+	values.Global.IdentityTrustAnchorsPEM = string(data)
+
+	return values, nil
 }
 
 func TestValidate(t *testing.T) {
 	t.Run("Accepts the default options as valid", func(t *testing.T) {
-		opts, err := testInstallOptions()
+		values, err := testInstallOptions()
 		if err != nil {
 			t.Fatalf("Unexpected error: %v\n", err)
 		}
 
-		if err := opts.validate(); err != nil {
+		if err := validateValues(nil, values); err != nil {
 			t.Fatalf("Unexpected error: %s", err)
 		}
 	})
 
 	t.Run("Rejects invalid destination networks", func(t *testing.T) {
-		options, err := testInstallOptions()
+		values, err := testInstallOptions()
 		if err != nil {
 			t.Fatalf("Unexpected error: %v\n", err)
 		}
 
-		options.destinationGetNetworks = []string{"wrong"}
+		values.Global.Proxy.DestinationGetNetworks = "wrong"
 		expected := "cannot parse destination get networks: invalid CIDR address: wrong"
 
-		err = options.validate()
+		err = validateValues(nil, values)
 		if err == nil {
 			t.Fatal("Expected error, got nothing")
 		}
@@ -300,15 +324,15 @@ func TestValidate(t *testing.T) {
 	})
 
 	t.Run("Rejects invalid controller log level", func(t *testing.T) {
-		options, err := testInstallOptions()
+		values, err := testInstallOptions()
 		if err != nil {
 			t.Fatalf("Unexpected error: %v\n", err)
 		}
 
-		options.controllerLogLevel = "super"
+		values.Global.ControllerLogLevel = "super"
 		expected := "--controller-log-level must be one of: panic, fatal, error, warn, info, debug"
 
-		err = options.validate()
+		err = validateValues(nil, values)
 		if err == nil {
 			t.Fatal("Expected error, got nothing")
 		}
@@ -334,14 +358,14 @@ func TestValidate(t *testing.T) {
 			{"warn,linkerd=foobar", false},
 		}
 
-		options, err := testInstallOptions()
+		values, err := testInstallOptions()
 		if err != nil {
 			t.Fatalf("Unexpected error: %v\n", err)
 		}
 
 		for _, tc := range testCases {
-			options.proxyLogLevel = tc.input
-			err := options.validate()
+			values.Global.Proxy.LogLevel = tc.input
+			err := validateValues(nil, values)
 			if tc.valid && err != nil {
 				t.Fatalf("Error not expected: %s", err)
 			}
@@ -372,16 +396,30 @@ func TestValidate(t *testing.T) {
 		}
 		for _, tc := range testCases {
 
-			options, err := testInstallOptions()
+			values, err := testInstallOptions()
 			if err != nil {
 				t.Fatalf("Unexpected error: %v\n", err)
 			}
 
-			options.identityOptions.crtPEMFile = filepath.Join("testdata", tc.crtFilePrefix+"-crt.pem")
-			options.identityOptions.keyPEMFile = filepath.Join("testdata", tc.crtFilePrefix+"-key.pem")
-			options.identityOptions.trustPEMFile = filepath.Join("testdata", tc.crtFilePrefix+"-trust-anchors.pem")
+			crt, err := loadCrtPEM(filepath.Join("testdata", tc.crtFilePrefix+"-crt.pem"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			values.Identity.Issuer.TLS.CrtPEM = crt
 
-			err = options.identityOptions.validate(false, "cluster.local")
+			key, err := loadKeyPEM(filepath.Join("testdata", tc.crtFilePrefix+"-key.pem"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			values.Identity.Issuer.TLS.KeyPEM = key
+
+			ca, err := ioutil.ReadFile(filepath.Join("testdata", tc.crtFilePrefix+"-trust-anchors.pem"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			values.Global.IdentityTrustAnchorsPEM = string(ca)
+
+			err = validateValues(nil, values)
 
 			if tc.expectedError != "" {
 				if err == nil {
@@ -400,35 +438,36 @@ func TestValidate(t *testing.T) {
 
 	t.Run("Rejects identity cert files data when external issuer is set", func(t *testing.T) {
 
-		options, err := testInstallOptions()
-		options.identityOptions.crtPEMFile = ""
-		options.identityOptions.keyPEMFile = ""
-		options.identityOptions.trustPEMFile = ""
-
+		values, err := testInstallOptions()
 		if err != nil {
 			t.Fatalf("Unexpected error: %v\n", err)
 		}
 
-		withoutCertDataOptions := options.identityOptions
-		withCrtFile := *withoutCertDataOptions
-		withCrtFile.crtPEMFile = "crt-file"
-		withTrustAnchorsFile := *withoutCertDataOptions
-		withTrustAnchorsFile.trustPEMFile = "ta-file"
-		withKeyFile := *withoutCertDataOptions
-		withKeyFile.keyPEMFile = "key-file"
+		values.Identity.Issuer.Scheme = string(corev1.SecretTypeTLS)
+
+		withoutCertDataOptions, _ := values.DeepCopy()
+
+		withCrtFile, _ := values.DeepCopy()
+		withCrtFile.Identity.Issuer.TLS.CrtPEM = "certificate"
+
+		withTrustAnchorsFile, _ := values.DeepCopy()
+		withTrustAnchorsFile.Global.IdentityTrustAnchorsPEM = "trust anchors"
+
+		withKeyFile, _ := values.DeepCopy()
+		withKeyFile.Identity.Issuer.TLS.KeyPEM = "key"
 
 		testCases := []struct {
-			input         *installIdentityOptions
+			input         *charts.Values
 			expectedError string
 		}{
 			{withoutCertDataOptions, ""},
-			{&withCrtFile, "--identity-issuer-certificate-file must not be specified if --identity-external-issuer=true"},
-			{&withTrustAnchorsFile, "--identity-trust-anchors-file must not be specified if --identity-external-issuer=true"},
-			{&withKeyFile, "--identity-issuer-key-file must not be specified if --identity-external-issuer=true"},
+			{withCrtFile, "--identity-issuer-certificate-file must not be specified if --identity-external-issuer=true"},
+			{withTrustAnchorsFile, "--identity-trust-anchors-file must not be specified if --identity-external-issuer=true"},
+			{withKeyFile, "--identity-issuer-key-file must not be specified if --identity-external-issuer=true"},
 		}
 
 		for _, tc := range testCases {
-			err = tc.input.validate(true, "cluster.local")
+			err = validateValues(nil, tc.input)
 
 			if tc.expectedError != "" {
 				if err == nil {

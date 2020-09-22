@@ -12,6 +12,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/fatih/color"
+	charts "github.com/linkerd/linkerd2/pkg/charts/linkerd2"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
@@ -215,4 +216,13 @@ func getDefaultNamespace() string {
 // using the default registry and the provided registry is not the default.
 func registryOverride(image, registry string) string {
 	return strings.Replace(image, defaultDockerRegistry, registry, 1)
+}
+
+func setHeartbeatSchedule(values *charts.Values) {
+	// Some of the heartbeat Prometheus queries rely on 5m resolution, which
+	// means at least 5 minutes of data available. Start the first CronJob 10
+	// minutes after `linkerd install` is run, to give the user 5 minutes to
+	// install.
+	t := time.Now().Add(10 * time.Minute).UTC()
+	values.HeartbeatSchedule = fmt.Sprintf("%d %d * * * ", t.Minute(), t.Hour())
 }

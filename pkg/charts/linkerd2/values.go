@@ -308,3 +308,12 @@ func (v Values) merge(src Values) (Values, error) {
 
 	return src, nil
 }
+
+func (v *Values) DeepCopy() (*Values, error) {
+	dst := Values{}
+	err := mergo.Merge(&dst, v)
+	if err != nil {
+		return nil, err
+	}
+	return &dst, nil
+}

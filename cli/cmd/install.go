@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/linkerd/linkerd2/cli/flag"
 	"github.com/linkerd/linkerd2/pkg/charts"
 	l5dcharts "github.com/linkerd/linkerd2/pkg/charts/linkerd2"
 	"github.com/linkerd/linkerd2/pkg/healthcheck"
@@ -72,7 +73,6 @@ var (
 	templatesControlPlaneStage = []string{
 		"templates/_config.tpl",
 		"templates/_helpers.tpl",
-		"templates/config.yaml",
 		"templates/identity.yaml",
 		"templates/controller.yaml",
 		"templates/destination.yaml",
@@ -90,7 +90,7 @@ var (
 /* Commands */
 
 func newCmdInstallConfig(values *l5dcharts.Values) *cobra.Command {
-	flags, options := makeAllStageFlags(values)
+	flags, flagSet := makeAllStageFlags(values)
 
 	cmd := &cobra.Command{
 		Use:   "config [flags]",
@@ -107,8 +107,12 @@ resources for the Linkerd control plane. This command should be followed by
   # Install Linkerd into a non-default namespace.
   linkerd install config -l linkerdtest | kubectl apply -f -`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			err := flag.ApplySetFlags(values, flags)
+			if err != nil {
+				return err
+			}
 			if !ignoreCluster {
-				if err := errAfterRunningChecks(options); err != nil {
+				if err := errAfterRunningChecks(values.Global.CNIEnabled); err != nil {
 					if healthcheck.IsCategoryError(err, healthcheck.KubernetesAPIChecks) {
 						fmt.Fprintf(os.Stderr, errMsgCannotInitializeClient, err)
 					} else {
@@ -118,16 +122,11 @@ resources for the Linkerd control plane. This command should be followed by
 				}
 			}
 
-			err := options.applyToValues(values)
-			if err != nil {
-				return err
-			}
-
 			return render(os.Stdout, values, configStage)
 		},
 	}
 
-	cmd.Flags().AddFlagSet(flags)
+	cmd.Flags().AddFlagSet(flagSet)
 
 	return cmd
 }
@@ -135,12 +134,16 @@ resources for the Linkerd control plane. This command should be followed by
 func newCmdInstallControlPlane(values *l5dcharts.Values) *cobra.Command {
 	var skipChecks bool
 
-	allStageFlags, allStageOptions := makeAllStageFlags(values)
-	installUpgradeFlags, installUpgradeOptions, err := makeInstallUpgradeFlags(values)
+	allStageFlags, allStageFlagSet := makeAllStageFlags(values)
+	installOnlyFlags, installOnlyFlagSet := makeInstallFlags(values)
+	installUpgradeFlags, installUpgradeFlagSet, err := makeInstallUpgradeFlags(values)
 	if err != nil {
 		fmt.Fprint(os.Stderr, err.Error())
 		os.Exit(1)
 	}
+	proxyFlags, proxyFlagSet := makeProxyFlags(values)
+
+	flags := flattenFlags(allStageFlags, installOnlyFlags, installUpgradeFlags, proxyFlags)
 
 	cmd := &cobra.Command{
 		Use:   "control-plane [flags]",
@@ -156,80 +159,31 @@ control plane. It should be run after "linkerd install config".`,
   # Install Linkerd into a non-default namespace.
   linkerd install control-plane -l linkerdtest | kubectl apply -f -`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if !skipChecks {
-				// check if global resources exist to determine if the `install config`
-				// stage succeeded
-				if err := errAfterRunningChecks(allStageOptions); err == nil {
-					if healthcheck.IsCategoryError(err, healthcheck.KubernetesAPIChecks) {
-						fmt.Fprintf(os.Stderr, errMsgGlobalResourcesMissing, controlPlaneNamespace)
-					}
-					os.Exit(1)
-				}
-			}
-
-			var k8sAPI *k8s.KubernetesAPI
-
-			if !ignoreCluster {
-				k8sAPI, err = k8s.NewAPI(kubeconfigPath, kubeContext, impersonate, impersonateGroup, 30*time.Second)
-				if err != nil {
-					return err
-				}
-				stored, err := loadStoredValues(k8sAPI)
-				if err != nil {
-					return err
-				}
-				if stored != nil {
-					fmt.Fprintf(os.Stderr, errMsgLinkerdConfigResourceConflict, controlPlaneNamespace, "Secret/linkerd-config-overrides already exists")
-					os.Exit(1)
-				}
-				err = errIfLinkerdConfigConfigMapExists()
-				if err != nil {
-					fmt.Fprintf(os.Stderr, errMsgLinkerdConfigResourceConflict, controlPlaneNamespace, err.Error())
-					os.Exit(1)
-				}
-			}
-
-			err = installUpgradeOptions.validate()
-			if err != nil {
-				return err
-			}
-
-			err = allStageOptions.applyToValues(values)
-			if err != nil {
-				return err
-			}
-			err = installUpgradeOptions.applyToValues(k8sAPI, values)
-			if err != nil {
-				return err
-			}
-			err = installUpgradeOptions.identityOptions.genValuesIfNecessary(values)
-			if err != nil {
-				return err
-			}
-
-			return render(os.Stdout, values, controlPlaneStage)
+			return install(values, flags, skipChecks, controlPlaneStage)
 		},
 	}
 
-	cmd.Flags().AddFlagSet(allStageFlags)
-	cmd.Flags().AddFlagSet(installUpgradeFlags)
+	cmd.Flags().AddFlagSet(allStageFlagSet)
+	cmd.Flags().AddFlagSet(installOnlyFlagSet)
+	cmd.Flags().AddFlagSet(installUpgradeFlagSet)
+	cmd.Flags().AddFlagSet(proxyFlagSet)
 
 	return cmd
 }
 
 func newCmdInstall() *cobra.Command {
 	values, err := l5dcharts.NewValues(false)
-	if err != nil {
-		fmt.Fprint(os.Stderr, err.Error())
-		os.Exit(1)
-	}
 
-	allStageFlags, allStageOptions := makeAllStageFlags(values)
-	installUpgradeFlags, installUpgradeOptions, err := makeInstallUpgradeFlags(values)
+	allStageFlags, allStageFlagSet := makeAllStageFlags(values)
+	installOnlyFlags, installOnlyFlagSet := makeInstallFlags(values)
+	installUpgradeFlags, installUpgradeFlagSet, err := makeInstallUpgradeFlags(values)
 	if err != nil {
 		fmt.Fprint(os.Stderr, err.Error())
 		os.Exit(1)
 	}
+	proxyFlags, proxyFlagSet := makeProxyFlags(values)
+
+	flags := flattenFlags(allStageFlags, installOnlyFlags, installUpgradeFlags, proxyFlags)
 
 	cmd := &cobra.Command{
 		Use:   "install [flags]",
@@ -248,51 +202,14 @@ control plane.`,
   # Installation may also be broken up into two stages by user privilege, via
   # subcommands.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			var k8sAPI *k8s.KubernetesAPI
-			if !ignoreCluster {
-				k8sAPI, err = k8s.NewAPI(kubeconfigPath, kubeContext, impersonate, impersonateGroup, 30*time.Second)
-				if err != nil {
-					return err
-				}
-				stored, err := loadStoredValues(k8sAPI)
-				if err != nil {
-					return err
-				}
-				if stored != nil {
-					fmt.Fprintf(os.Stderr, errMsgLinkerdConfigResourceConflict, controlPlaneNamespace, "Secret/linkerd-config-overrides already exists")
-					os.Exit(1)
-				}
-				err = errIfLinkerdConfigConfigMapExists()
-				if err != nil {
-					fmt.Fprintf(os.Stderr, errMsgLinkerdConfigResourceConflict, controlPlaneNamespace, err.Error())
-					os.Exit(1)
-				}
-			}
-
-			err = installUpgradeOptions.validate()
-			if err != nil {
-				return err
-			}
-
-			err = allStageOptions.applyToValues(values)
-			if err != nil {
-				return err
-			}
-			err = installUpgradeOptions.applyToValues(k8sAPI, values)
-			if err != nil {
-				return err
-			}
-			err = installUpgradeOptions.identityOptions.genValuesIfNecessary(values)
-			if err != nil {
-				return err
-			}
-
-			return render(os.Stdout, values, "")
+			return install(values, flags, true, "")
 		},
 	}
 
-	cmd.Flags().AddFlagSet(allStageFlags)
-	cmd.Flags().AddFlagSet(installUpgradeFlags)
+	cmd.Flags().AddFlagSet(allStageFlagSet)
+	cmd.Flags().AddFlagSet(installOnlyFlagSet)
+	cmd.Flags().AddFlagSet(installUpgradeFlagSet)
+	cmd.Flags().AddFlagSet(proxyFlagSet)
 	cmd.PersistentFlags().BoolVar(&ignoreCluster, "ignore-cluster", false,
 		"Ignore the current Kubernetes cluster when checking for existing cluster configuration (default false)")
 
@@ -300,6 +217,58 @@ control plane.`,
 	cmd.AddCommand(newCmdInstallControlPlane(values))
 
 	return cmd
+}
+
+func install(values *l5dcharts.Values, flags []flag.Flag, skipChecks bool, stage string) error {
+	err := flag.ApplySetFlags(values, flags)
+	if err != nil {
+		return err
+	}
+
+	if !skipChecks {
+		// check if global resources exist to determine if the `install config`
+		// stage succeeded
+		if err := errAfterRunningChecks(values.Global.CNIEnabled); err == nil {
+			if healthcheck.IsCategoryError(err, healthcheck.KubernetesAPIChecks) {
+				fmt.Fprintf(os.Stderr, errMsgGlobalResourcesMissing, controlPlaneNamespace)
+			}
+			os.Exit(1)
+		}
+	}
+
+	var k8sAPI *k8s.KubernetesAPI
+
+	if !ignoreCluster {
+		k8sAPI, err = k8s.NewAPI(kubeconfigPath, kubeContext, impersonate, impersonateGroup, 30*time.Second)
+		if err != nil {
+			return err
+		}
+		stored, err := loadStoredValues(k8sAPI)
+		if err != nil {
+			return err
+		}
+		if stored != nil {
+			fmt.Fprintf(os.Stderr, errMsgLinkerdConfigResourceConflict, controlPlaneNamespace, "Secret/linkerd-config-overrides already exists")
+			os.Exit(1)
+		}
+		err = errIfLinkerdConfigConfigMapExists()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, errMsgLinkerdConfigResourceConflict, controlPlaneNamespace, err.Error())
+			os.Exit(1)
+		}
+	}
+
+	err = initializeIssuerCredentials(k8sAPI, values)
+	if err != nil {
+		return err
+	}
+
+	err = validateValues(k8sAPI, values)
+	if err != nil {
+		return err
+	}
+
+	return render(os.Stdout, values, stage)
 }
 
 func render(w io.Writer, values *l5dcharts.Values, stage string) error {
@@ -441,7 +410,7 @@ func renderOverrides(values *l5dcharts.Values, namespace string) ([]byte, error)
 	return bytes, nil
 }
 
-func errAfterRunningChecks(options *allStageOptions) error {
+func errAfterRunningChecks(cniEnabled bool) error {
 	checks := []healthcheck.CategoryID{
 		healthcheck.KubernetesAPIChecks,
 		healthcheck.LinkerdPreInstallGlobalResourcesChecks,
@@ -453,7 +422,7 @@ func errAfterRunningChecks(options *allStageOptions) error {
 		ImpersonateGroup:      impersonateGroup,
 		KubeContext:           kubeContext,
 		APIAddr:               apiAddr,
-		CNIEnabled:            options.cniEnabled,
+		CNIEnabled:            cniEnabled,
 	})
 
 	var k8sAPIError error
@@ -524,4 +493,12 @@ func checkFilesExist(files []string) error {
 		}
 	}
 	return nil
+}
+
+func flattenFlags(flags ...[]flag.Flag) []flag.Flag {
+	out := []flag.Flag{}
+	for _, f := range flags {
+		out = append(out, f...)
+	}
+	return out
 }

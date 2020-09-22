@@ -98,6 +98,7 @@ type OwnerRetrieverFunc func(*corev1.Pod) (string, string)
 // ResourceConfig contains the parsed information for a given workload
 type ResourceConfig struct {
 	configs        *config.All
+	values         *l5dcharts.Values
 	nsAnnotations  map[string]string
 	ownerRetriever OwnerRetrieverFunc
 	origin         Origin
@@ -143,6 +144,19 @@ func NewResourceConfig(configs *config.All, origin Origin) *ResourceConfig {
 
 	config.pod.meta = &metav1.ObjectMeta{}
 	config.pod.labels = map[string]string{k8s.ControllerNSLabel: configs.GetGlobal().GetLinkerdNamespace()}
+	config.pod.annotations = map[string]string{}
+	return config
+}
+
+// NewResourceConfig creates and initializes a ResourceConfig
+func NewResourceConfigFromValues(values *l5dcharts.Values, origin Origin) *ResourceConfig {
+	config := &ResourceConfig{
+		values: values,
+		origin: origin,
+	}
+
+	config.pod.meta = &metav1.ObjectMeta{}
+	config.pod.labels = map[string]string{k8s.ControllerNSLabel: values.Global.Namespace}
 	config.pod.annotations = map[string]string{}
 	return config
 }
@@ -219,37 +233,41 @@ func (conf *ResourceConfig) GetPatch(injectProxy bool) ([]byte, error) {
 		}
 	}
 
-	clusterDomain := conf.configs.GetGlobal().GetClusterDomain()
-	if clusterDomain == "" {
-		clusterDomain = "cluster.local"
-	}
-	values := &patch{
-		Values: l5dcharts.Values{
+	values := conf.values
+	if conf.configs != nil {
+		clusterDomain := conf.configs.GetGlobal().GetClusterDomain()
+		if clusterDomain == "" {
+			clusterDomain = "cluster.local"
+		}
+		values = &l5dcharts.Values{
 			Global: &l5dcharts.Global{
 				Namespace:     conf.configs.GetGlobal().GetLinkerdNamespace(),
 				ClusterDomain: clusterDomain,
 			},
-		},
+		}
+	}
+	patch := &patch{
+		Values:      *values,
 		Annotations: map[string]string{},
 		Labels:      map[string]string{},
 	}
 	switch strings.ToLower(conf.workload.metaType.Kind) {
 	case k8s.Pod:
 	case k8s.CronJob:
-		values.PathPrefix = "/spec/jobTemplate/spec/template"
+		patch.PathPrefix = "/spec/jobTemplate/spec/template"
 	default:
-		values.PathPrefix = "/spec/template"
+		patch.PathPrefix = "/spec/template"
 	}
 
 	if conf.pod.spec != nil {
-		conf.injectPodAnnotations(values)
+		conf.injectPodAnnotations(patch)
 		if injectProxy {
-			conf.injectObjectMeta(values)
-			conf.injectPodSpec(values)
+			conf.injectObjectMeta(patch)
+			conf.injectPodSpec(patch)
 		}
 	}
 
-	rawValues, err := yaml.Marshal(values)
+	rawValues, err := yaml.Marshal(patch)
 	if err != nil {
 		return nil, err
 	}
@@ -491,52 +509,55 @@ func (conf *ResourceConfig) complete(template *corev1.PodTemplateSpec) {
 
 // injectPodSpec adds linkerd sidecars to the provided PodSpec.
 func (conf *ResourceConfig) injectPodSpec(values *patch) {
-	values.Global.Proxy = &l5dcharts.Proxy{
-		Component:              conf.pod.labels[k8s.ProxyDeploymentLabel],
-		EnableExternalProfiles: conf.enableExternalProfiles(),
-		DisableTap:             conf.tapDisabled(),
-		Image: &l5dcharts.Image{
-			Name:       conf.proxyImage(),
-			Version:    conf.proxyVersion(),
-			PullPolicy: conf.proxyImagePullPolicy(),
-		},
-		LogLevel:  conf.proxyLogLevel(),
-		LogFormat: conf.proxyLogFormat(),
-		Ports: &l5dcharts.Ports{
-			Admin:    conf.proxyAdminPort(),
-			Control:  conf.proxyControlPort(),
-			Inbound:  conf.proxyInboundPort(),
-			Outbound: conf.proxyOutboundPort(),
-		},
-		UID:                           conf.proxyUID(),
-		Resources:                     conf.proxyResourceRequirements(),
-		WaitBeforeExitSeconds:         conf.proxyWaitBeforeExitSeconds(),
-		IsGateway:                     conf.isGateway(),
-		RequireIdentityOnInboundPorts: conf.requireIdentityOnInboundPorts(),
-		DestinationGetNetworks:        conf.destinationGetNetworks(),
-		OutboundConnectTimeout:        conf.getOutboundConnectTimeout(),
-		InboundConnectTimeout:         conf.getInboundConnectTimeout(),
-	}
-
-	if v := conf.pod.meta.Annotations[k8s.ProxyEnableDebugAnnotation]; v != "" {
-		debug, err := strconv.ParseBool(v)
-		if err != nil {
-			log.Warnf("unrecognized value used for the %s annotation: %s", k8s.ProxyEnableDebugAnnotation, v)
-			debug = false
+	if conf.configs != nil {
+		values.Global.Proxy = &l5dcharts.Proxy{
+			Component:              conf.pod.labels[k8s.ProxyDeploymentLabel],
+			EnableExternalProfiles: conf.enableExternalProfiles(),
+			DisableTap:             conf.tapDisabled(),
+			Image: &l5dcharts.Image{
+				Name:       conf.proxyImage(),
+				Version:    conf.proxyVersion(),
+				PullPolicy: conf.proxyImagePullPolicy(),
+			},
+			LogLevel:  conf.proxyLogLevel(),
+			LogFormat: conf.proxyLogFormat(),
+			Ports: &l5dcharts.Ports{
+				Admin:    conf.proxyAdminPort(),
+				Control:  conf.proxyControlPort(),
+				Inbound:  conf.proxyInboundPort(),
+				Outbound: conf.proxyOutboundPort(),
+			},
+			UID:                           conf.proxyUID(),
+			Resources:                     conf.proxyResourceRequirements(),
+			WaitBeforeExitSeconds:         conf.proxyWaitBeforeExitSeconds(),
+			IsGateway:                     conf.isGateway(),
+			RequireIdentityOnInboundPorts: conf.requireIdentityOnInboundPorts(),
+			DestinationGetNetworks:        conf.destinationGetNetworks(),
+			OutboundConnectTimeout:        conf.getOutboundConnectTimeout(),
+			InboundConnectTimeout:         conf.getInboundConnectTimeout(),
 		}
 
-		if debug {
-			log.Infof("inject debug container")
-			values.DebugContainer = &l5dcharts.DebugContainer{
-				Image: &l5dcharts.Image{
-					Name:       conf.debugSidecarImage(),
-					Version:    conf.debugSidecarImageVersion(),
-					PullPolicy: conf.debugSidecarImagePullPolicy(),
-				},
+		if v := conf.pod.meta.Annotations[k8s.ProxyEnableDebugAnnotation]; v != "" {
+			debug, err := strconv.ParseBool(v)
+			if err != nil {
+				log.Warnf("unrecognized value used for the %s annotation: %s", k8s.ProxyEnableDebugAnnotation, v)
+				debug = false
+			}
+
+			if debug {
+				log.Infof("inject debug container")
+				values.DebugContainer = &l5dcharts.DebugContainer{
+					Image: &l5dcharts.Image{
+						Name:       conf.debugSidecarImage(),
+						Version:    conf.debugSidecarImageVersion(),
+						PullPolicy: conf.debugSidecarImagePullPolicy(),
+					},
+				}
 			}
 		}
 	}
 
+	values.Global.Proxy.Component = conf.pod.labels[k8s.ProxyDeploymentLabel]
 	saVolumeMount := conf.serviceAccountVolumeMount()
 
 	// use the primary container's capabilities to ensure psp compliance, if
@@ -564,54 +585,58 @@ func (conf *ResourceConfig) injectPodSpec(values *patch) {
 		}
 	}
 
-	if !conf.configs.GetGlobal().GetCniEnabled() {
+	if !conf.configs.GetGlobal().GetCniEnabled() || values.Global.CNIEnabled {
 		conf.injectProxyInit(values)
 	}
 
 	values.AddRootVolumes = len(conf.pod.spec.Volumes) == 0
 
-	values.Global.Proxy.Trace = &l5dcharts.Trace{}
-	if trace := conf.trace(); trace != nil {
-		log.Infof("tracing enabled: remote service=%s, service account=%s", trace.CollectorSvcAddr, trace.CollectorSvcAccount)
-		values.Global.Proxy.Trace = trace
-	}
+	if conf.configs != nil {
+		values.Global.Proxy.Trace = &l5dcharts.Trace{}
+		if trace := conf.trace(); trace != nil {
+			log.Infof("tracing enabled: remote service=%s, service account=%s", trace.CollectorSvcAddr, trace.CollectorSvcAccount)
+			values.Global.Proxy.Trace = trace
+		}
 
-	idctx := conf.identityContext()
-	if idctx == nil {
-		values.Global.Proxy.DisableIdentity = true
-		return
+		idctx := conf.identityContext()
+		if idctx == nil {
+			values.Global.Proxy.DisableIdentity = true
+			return
+		}
+		values.Global.IdentityTrustAnchorsPEM = idctx.GetTrustAnchorsPem()
+		values.Global.IdentityTrustDomain = idctx.GetTrustDomain()
+		values.Identity = &l5dcharts.Identity{}
 	}
-	values.Global.IdentityTrustAnchorsPEM = idctx.GetTrustAnchorsPem()
-	values.Global.IdentityTrustDomain = idctx.GetTrustDomain()
-	values.Identity = &l5dcharts.Identity{}
 
 }
 
 func (conf *ResourceConfig) injectProxyInit(values *patch) {
-	values.Global.ProxyInit = &l5dcharts.ProxyInit{
-		Image: &l5dcharts.Image{
-			Name:       conf.proxyInitImage(),
-			PullPolicy: conf.proxyInitImagePullPolicy(),
-			Version:    conf.proxyInitVersion(),
-		},
-		IgnoreInboundPorts:  conf.proxyInboundSkipPorts(),
-		IgnoreOutboundPorts: conf.proxyOutboundSkipPorts(),
-		Resources: &l5dcharts.Resources{
-			CPU: l5dcharts.Constraints{
-				Limit:   proxyInitResourceLimitCPU,
-				Request: proxyInitResourceRequestCPU,
+	if conf.configs != nil {
+		values.Global.ProxyInit = &l5dcharts.ProxyInit{
+			Image: &l5dcharts.Image{
+				Name:       conf.proxyInitImage(),
+				PullPolicy: conf.proxyInitImagePullPolicy(),
+				Version:    conf.proxyInitVersion(),
 			},
-			Memory: l5dcharts.Constraints{
-				Limit:   proxyInitResourceLimitMemory,
-				Request: proxyInitResourceRequestMemory,
+			IgnoreInboundPorts:  conf.proxyInboundSkipPorts(),
+			IgnoreOutboundPorts: conf.proxyOutboundSkipPorts(),
+			Resources: &l5dcharts.Resources{
+				CPU: l5dcharts.Constraints{
+					Limit:   proxyInitResourceLimitCPU,
+					Request: proxyInitResourceRequestCPU,
+				},
+				Memory: l5dcharts.Constraints{
+					Limit:   proxyInitResourceLimitMemory,
+					Request: proxyInitResourceRequestMemory,
+				},
 			},
-		},
-		Capabilities: values.Global.Proxy.Capabilities,
-		SAMountPath:  values.Global.Proxy.SAMountPath,
-		XTMountPath: &l5dcharts.VolumeMountPath{
-			MountPath: k8s.MountPathXtablesLock,
-			Name:      k8s.InitXtablesLockVolumeMountName,
-		},
+			Capabilities: values.Global.Proxy.Capabilities,
+			SAMountPath:  values.Global.Proxy.SAMountPath,
+			XTMountPath: &l5dcharts.VolumeMountPath{
+				MountPath: k8s.MountPathXtablesLock,
+				Name:      k8s.InitXtablesLockVolumeMountName,
+			},
+		}
 	}
 
 	if v := conf.pod.meta.Annotations[k8s.CloseWaitTimeoutAnnotation]; v != "" {
@@ -675,7 +700,7 @@ func (conf *ResourceConfig) trace() *l5dcharts.Trace {
 func (conf *ResourceConfig) injectObjectMeta(values *patch) {
 	values.Annotations[k8s.ProxyVersionAnnotation] = conf.proxyVersion()
 
-	if conf.identityContext() != nil {
+	if conf.identityContext() != nil || (conf.configs != nil && !values.Global.Proxy.DisableIdentity) {
 		values.Annotations[k8s.IdentityModeAnnotation] = k8s.IdentityModeDefault
 	} else {
 		values.Annotations[k8s.IdentityModeAnnotation] = k8s.IdentityModeDisabled

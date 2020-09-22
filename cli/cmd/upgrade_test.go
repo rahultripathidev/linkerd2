@@ -11,11 +11,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/linkerd/linkerd2/cli/flag"
 	"github.com/linkerd/linkerd2/pkg/charts/linkerd2"
 	charts "github.com/linkerd/linkerd2/pkg/charts/linkerd2"
 	"github.com/linkerd/linkerd2/pkg/k8s"
 	"github.com/linkerd/linkerd2/pkg/tls"
+	"github.com/spf13/pflag"
 	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/yaml"
 )
 
 const (
@@ -44,7 +47,7 @@ type (
    others there are certain expected differences */
 
 func TestUpgradeDefault(t *testing.T) {
-	installOpts, upgradeOpts := testOptions(t)
+	installOpts, upgradeOpts, _ := testOptions(t)
 	install, upgrade, err := renderInstallAndUpgrade(t, installOpts, upgradeOpts)
 	if err != nil {
 		t.Fatal(err)
@@ -64,8 +67,8 @@ func TestUpgradeDefault(t *testing.T) {
 }
 
 func TestUpgradeHA(t *testing.T) {
-	installOpts, upgradeOpts := testOptions(t)
-	installOpts.highAvailability = true
+	installOpts, upgradeOpts, _ := testOptions(t)
+	installOpts.Global.HighAvailability = true
 	install, upgrade, err := renderInstallAndUpgrade(t, installOpts, upgradeOpts)
 	if err != nil {
 		t.Fatal(err)
@@ -85,13 +88,12 @@ func TestUpgradeHA(t *testing.T) {
 }
 
 func TestUpgradeExternalIssuer(t *testing.T) {
-	installOpts, upgradeOpts := testOptions(t)
+	installOpts, upgradeOpts, _ := testOptions(t)
 
 	issuer := generateIssuerCerts(t, true)
 	defer issuer.cleanup()
 
-	values := installValues(t, installOpts, nil)
-	values.Identity = &linkerd2.Identity{
+	installOpts.Identity = &linkerd2.Identity{
 		Issuer: &linkerd2.Issuer{
 			Scheme: string(corev1.SecretTypeTLS),
 			TLS: &linkerd2.IssuerTLS{
@@ -100,9 +102,9 @@ func TestUpgradeExternalIssuer(t *testing.T) {
 			},
 		},
 	}
-	values.Global.IdentityTrustAnchorsPEM = issuer.ca
-	install := renderInstall(t, values)
-	upgrade, err := renderUpgrade(install.String()+externalIssuerSecret(issuer), upgradeOpts, nil, false)
+	installOpts.Global.IdentityTrustAnchorsPEM = issuer.ca
+	install := renderInstall(t, installOpts)
+	upgrade, err := renderUpgrade(install.String()+externalIssuerSecret(issuer), upgradeOpts, false)
 
 	if err != nil {
 		t.Fatal(err)
@@ -122,27 +124,26 @@ func TestUpgradeExternalIssuer(t *testing.T) {
 }
 
 func TestUpgradeIssuerWithExternalIssuerFails(t *testing.T) {
-	installOpts, upgradeOpts := testOptions(t)
+	installOpts, upgradeOpts, flagSet := testOptions(t)
 
-	issuer := generateIssuerCerts(t, true)
+	issuer := generateIssuerCerts(t, false)
 	defer issuer.cleanup()
 
-	values := installValues(t, installOpts, nil)
-	values.Global.IdentityTrustDomain = "cluster.local"
-	values.Global.IdentityTrustDomain = issuer.ca
-	values.Identity.Issuer.Scheme = string(corev1.SecretTypeTLS)
-	values.Identity.Issuer.TLS.CrtPEM = issuer.crt
-	values.Identity.Issuer.TLS.KeyPEM = issuer.key
-	install := renderInstall(t, values)
+	installOpts.Global.IdentityTrustDomain = "cluster.local"
+	installOpts.Global.IdentityTrustDomain = issuer.ca
+	installOpts.Identity.Issuer.Scheme = string(corev1.SecretTypeTLS)
+	installOpts.Identity.Issuer.TLS.CrtPEM = issuer.crt
+	installOpts.Identity.Issuer.TLS.KeyPEM = issuer.key
+	install := renderInstall(t, installOpts)
 
 	upgradedIssuer := generateIssuerCerts(t, true)
 	defer upgradedIssuer.cleanup()
 
-	upgradeOpts.identityOptions.trustPEMFile = upgradedIssuer.caFile
-	upgradeOpts.identityOptions.crtPEMFile = upgradedIssuer.crtFile
-	upgradeOpts.identityOptions.keyPEMFile = upgradedIssuer.keyFile
+	flagSet.Set("identity-trust-anchors-file", upgradedIssuer.caFile)
+	flagSet.Set("identity-issuer-certificate-file", upgradedIssuer.crtFile)
+	flagSet.Set("identity-issuer-key-file", upgradedIssuer.keyFile)
 
-	_, err := renderUpgrade(install.String()+externalIssuerSecret(issuer), upgradeOpts, nil, false)
+	_, err := renderUpgrade(install.String()+externalIssuerSecret(issuer), upgradeOpts, false)
 
 	expectedErr := "cannot update issuer certificates if you are using external cert management solution"
 
@@ -152,14 +153,15 @@ func TestUpgradeIssuerWithExternalIssuerFails(t *testing.T) {
 }
 
 func TestUpgradeOverwriteIssuer(t *testing.T) {
-	installOpts, upgradeOpts := testOptions(t)
+	installOpts, upgradeOpts, flagSet := testOptions(t)
 
-	issuerCerts := generateIssuerCerts(t, true)
+	issuerCerts := generateIssuerCerts(t, false)
 	defer issuerCerts.cleanup()
 
-	upgradeOpts.identityOptions.trustPEMFile = issuerCerts.caFile
-	upgradeOpts.identityOptions.crtPEMFile = issuerCerts.crtFile
-	upgradeOpts.identityOptions.keyPEMFile = issuerCerts.keyFile
+	flagSet.Set("identity-trust-anchors-file", issuerCerts.caFile)
+	flagSet.Set("identity-issuer-certificate-file", issuerCerts.crtFile)
+	flagSet.Set("identity-issuer-key-file", issuerCerts.keyFile)
+
 	install, upgrade, err := renderInstallAndUpgrade(t, installOpts, upgradeOpts)
 	if err != nil {
 		t.Fatal(err)
@@ -205,12 +207,14 @@ func TestUpgradeOverwriteIssuer(t *testing.T) {
 }
 
 func TestUpgradeFailsWithOnlyIssuerCert(t *testing.T) {
-	installOpts, upgradeOpts := testOptions(t)
+	installOpts, upgradeOpts, flagSet := testOptions(t)
 
 	issuerCerts := generateIssuerCerts(t, true)
 	defer issuerCerts.cleanup()
-	upgradeOpts.identityOptions.trustPEMFile = issuerCerts.caFile
-	upgradeOpts.identityOptions.crtPEMFile = issuerCerts.crtFile
+
+	flagSet.Set("identity-trust-anchors-file", issuerCerts.caFile)
+	flagSet.Set("identity-issuer-certificate-file", issuerCerts.crtFile)
+
 	_, _, err := renderInstallAndUpgrade(t, installOpts, upgradeOpts)
 
 	expectedErr := "a private key file must be specified if other credentials are provided"
@@ -221,12 +225,14 @@ func TestUpgradeFailsWithOnlyIssuerCert(t *testing.T) {
 }
 
 func TestUpgradeFailsWithOnlyIssuerKey(t *testing.T) {
-	installOpts, upgradeOpts := testOptions(t)
+	installOpts, upgradeOpts, flagSet := testOptions(t)
 
-	issuerCerts := generateIssuerCerts(t, true)
+	issuerCerts := generateIssuerCerts(t, false)
 	defer issuerCerts.cleanup()
-	upgradeOpts.identityOptions.trustPEMFile = issuerCerts.caFile
-	upgradeOpts.identityOptions.keyPEMFile = issuerCerts.keyFile
+
+	flagSet.Set("identity-trust-anchors-file", issuerCerts.caFile)
+	flagSet.Set("identity-issuer-certificate-file", issuerCerts.crtFile)
+
 	_, _, err := renderInstallAndUpgrade(t, installOpts, upgradeOpts)
 
 	expectedErr := "a certificate file must be specified if other credentials are provided"
@@ -237,19 +243,21 @@ func TestUpgradeFailsWithOnlyIssuerKey(t *testing.T) {
 }
 
 func TestUpgradeRootFailsWithOldPods(t *testing.T) {
-	installOpts, upgradeOpts := testOptions(t)
+	installOpts, upgradeOpts, flagSet := testOptions(t)
 
 	oldIssuer := generateIssuerCerts(t, false)
 	defer oldIssuer.cleanup()
 
-	install := renderInstall(t, installValues(t, installOpts, nil))
+	install := renderInstall(t, installOpts)
 
 	issuerCerts := generateIssuerCerts(t, true)
 	defer issuerCerts.cleanup()
-	upgradeOpts.identityOptions.trustPEMFile = issuerCerts.caFile
-	upgradeOpts.identityOptions.keyPEMFile = issuerCerts.keyFile
-	upgradeOpts.identityOptions.crtPEMFile = issuerCerts.crtFile
-	_, err := renderUpgrade(install.String()+podWithSidecar(oldIssuer), upgradeOpts, nil, false)
+
+	flagSet.Set("identity-trust-anchors-file", issuerCerts.caFile)
+	flagSet.Set("identity-issuer-certificate-file", issuerCerts.crtFile)
+	flagSet.Set("identity-issuer-key-file", issuerCerts.keyFile)
+
+	_, err := renderUpgrade(install.String()+podWithSidecar(oldIssuer), upgradeOpts, false)
 
 	expectedErr := "You are attempting to use an issuer certificate which does not validate against the trust anchors of the following pods"
 	if err == nil || !strings.HasPrefix(err.Error(), expectedErr) {
@@ -258,14 +266,13 @@ func TestUpgradeRootFailsWithOldPods(t *testing.T) {
 }
 
 func TestUpgradeTracingAddon(t *testing.T) {
-	installOpts, upgradeOpts := testOptions(t)
+	installOpts, upgradeOpts, flagSet := testOptions(t)
 
-	allStageOptions := &allStageOptions{
-		addOnConfig: filepath.Join("testdata", "addon_config.yaml"),
-	}
+	install := renderInstall(t, installOpts)
 
-	install := renderInstall(t, installValues(t, installOpts, nil))
-	upgrade, err := renderUpgrade(install.String(), upgradeOpts, allStageOptions, false)
+	flagSet.Set("addon-config", filepath.Join("testdata", "addon_config.yaml"))
+
+	upgrade, err := renderUpgrade(install.String(), upgradeOpts, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,19 +306,24 @@ func TestUpgradeTracingAddon(t *testing.T) {
 }
 
 func TestUpgradeOverwriteTracingAddon(t *testing.T) {
-	installOpts, upgradeOpts := testOptions(t)
+	installOpts, upgradeOpts, flagSet := testOptions(t)
 
-	installAllStageOptions := &allStageOptions{
-		addOnConfig: filepath.Join("testdata", "addon_config.yaml"),
+	installAddons, err := ioutil.ReadFile(filepath.Join("testdata", "addon_config.yaml"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	upgradeAllStageOptions := &allStageOptions{
-		addOnConfig: filepath.Join("testdata", "addon_config_overwrite.yaml"),
+	err = yaml.Unmarshal(installAddons, installOpts)
+	if err != nil {
+		t.Fatal(err)
 	}
-	upgradeOpts.traceCollector = "overwrite-collector"
-	upgradeOpts.traceCollectorSvcAccount = "overwrite-collector.default"
-	installValues := installValues(t, installOpts, installAllStageOptions)
-	install := renderInstall(t, installValues)
-	upgrade, err := renderUpgrade(install.String(), upgradeOpts, upgradeAllStageOptions, false)
+
+	install := renderInstall(t, installOpts)
+
+	flagSet.Set("addon-config", filepath.Join("testdata", "addon_config.yaml"))
+	flagSet.Set("trace-collector", "overwrite-collector")
+	flagSet.Set("trace-collector-svc-account", "overwrite-collector.default")
+
+	upgrade, err := renderUpgrade(install.String(), upgradeOpts, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,34 +356,33 @@ func TestUpgradeOverwriteTracingAddon(t *testing.T) {
 }
 
 func TestUpgradeTwoLevelWebhookCrts(t *testing.T) {
-	installOpts, upgradeOpts := testOptions(t)
+	installOpts, upgradeOpts, _ := testOptions(t)
 
 	// This tests the case where the webhook certs are not self-signed.
-	values := installValues(t, installOpts, nil)
 	injectorCerts := generateCerts(t, "linkerd-proxy-injector.linkerd.svc", false)
 	defer injectorCerts.cleanup()
-	values.ProxyInjector.TLS = &linkerd2.TLS{
+	installOpts.ProxyInjector.TLS = &linkerd2.TLS{
 		CaBundle: injectorCerts.ca,
 		CrtPEM:   injectorCerts.crt,
 		KeyPEM:   injectorCerts.key,
 	}
 	tapCerts := generateCerts(t, "linkerd-tap.linkerd.svc", false)
 	defer tapCerts.cleanup()
-	values.Tap.TLS = &linkerd2.TLS{
+	installOpts.Tap.TLS = &linkerd2.TLS{
 		CaBundle: tapCerts.ca,
 		CrtPEM:   tapCerts.crt,
 		KeyPEM:   tapCerts.key,
 	}
 	validatorCerts := generateCerts(t, "linkerd-sp-validator.linkerd.svc", false)
 	defer validatorCerts.cleanup()
-	values.ProfileValidator.TLS = &linkerd2.TLS{
+	installOpts.ProfileValidator.TLS = &linkerd2.TLS{
 		CaBundle: validatorCerts.ca,
 		CrtPEM:   validatorCerts.crt,
 		KeyPEM:   validatorCerts.key,
 	}
 
-	install := renderInstall(t, values)
-	upgrade, err := renderUpgrade(install.String(), upgradeOpts, nil, false)
+	install := renderInstall(t, installOpts)
+	upgrade, err := renderUpgrade(install.String(), upgradeOpts, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -389,14 +400,20 @@ func TestUpgradeTwoLevelWebhookCrts(t *testing.T) {
 }
 
 func TestUpgradeWithAddonDisabled(t *testing.T) {
-	installOpts, upgradeOpts := testOptions(t)
+	installOpts, upgradeOpts, _ := testOptions(t)
 
-	allStageOptions := &allStageOptions{
-		addOnConfig: filepath.Join("testdata", "grafana_disabled.yaml"),
+	installAddons, err := ioutil.ReadFile(filepath.Join("testdata", "grafana_disabled.yaml"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	installValues := installValues(t, installOpts, allStageOptions)
-	install := renderInstall(t, installValues)
-	upgrade, err := renderUpgrade(install.String(), upgradeOpts, nil, false)
+
+	err = yaml.Unmarshal(installAddons, installOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	install := renderInstall(t, installOpts)
+	upgrade, err := renderUpgrade(install.String(), upgradeOpts, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -414,18 +431,23 @@ func TestUpgradeWithAddonDisabled(t *testing.T) {
 }
 
 func TestUpgradeEnableAddon(t *testing.T) {
-	installOpts, upgradeOpts := testOptions(t)
+	installOpts, upgradeOpts, flagSet := testOptions(t)
 
-	installAllStageOptions := &allStageOptions{
-		addOnConfig: filepath.Join("testdata", "grafana_disabled.yaml"),
-	}
-	upgradeAllStageOptions := &allStageOptions{
-		addOnConfig: filepath.Join("testdata", "grafana_enabled.yaml"),
+	installAddons, err := ioutil.ReadFile(filepath.Join("testdata", "grafana_disabled.yaml"))
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	installValues := installValues(t, installOpts, installAllStageOptions)
-	install := renderInstall(t, installValues)
-	upgrade, err := renderUpgrade(install.String(), upgradeOpts, upgradeAllStageOptions, false)
+	err = yaml.Unmarshal(installAddons, installOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	install := renderInstall(t, installOpts)
+
+	flagSet.Set("addon-config", filepath.Join("testdata", "grafana_enabled.yaml"))
+
+	upgrade, err := renderUpgrade(install.String(), upgradeOpts, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -461,17 +483,23 @@ func TestUpgradeEnableAddon(t *testing.T) {
 }
 
 func TestUpgradeRemoveAddonKeys(t *testing.T) {
-	installOpts, upgradeOpts := testOptions(t)
+	installOpts, upgradeOpts, flagSet := testOptions(t)
 
-	installAllStageOptions := &allStageOptions{
-		addOnConfig: filepath.Join("testdata", "grafana_enabled_resources.yaml"),
+	installAddons, err := ioutil.ReadFile(filepath.Join("testdata", "grafana_enabled_resources.yaml"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	upgradeAllStageOptions := &allStageOptions{
-		addOnConfig: filepath.Join("testdata", "grafana_enabled.yaml"),
+
+	err = yaml.Unmarshal(installAddons, installOpts)
+	if err != nil {
+		t.Fatal(err)
 	}
-	installValues := installValues(t, installOpts, installAllStageOptions)
-	install := renderInstall(t, installValues)
-	upgrade, err := renderUpgrade(install.String(), upgradeOpts, upgradeAllStageOptions, false)
+
+	install := renderInstall(t, installOpts)
+
+	flagSet.Set("addon-config", filepath.Join("testdata", "grafana_enabled.yaml"))
+
+	upgrade, err := renderUpgrade(install.String(), upgradeOpts, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -489,19 +517,23 @@ func TestUpgradeRemoveAddonKeys(t *testing.T) {
 }
 
 func TestUpgradeOverwriteRemoveAddonKeys(t *testing.T) {
-	installOpts, upgradeOpts := testOptions(t)
+	installOpts, upgradeOpts, flagSet := testOptions(t)
 
-	installAllStageOptions := &allStageOptions{
-		addOnConfig: filepath.Join("testdata", "grafana_enabled_resources.yaml"),
-	}
-	upgradeAllStageOptions := &allStageOptions{
-		addOnConfig: filepath.Join("testdata", "grafana_enabled.yaml"),
+	installAddons, err := ioutil.ReadFile(filepath.Join("testdata", "grafana_enabled_resources.yaml"))
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	installValues := installValues(t, installOpts, installAllStageOptions)
-	install := renderInstall(t, installValues)
+	err = yaml.Unmarshal(installAddons, installOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	upgrade, err := renderUpgrade(install.String(), upgradeOpts, upgradeAllStageOptions, true)
+	install := renderInstall(t, installOpts)
+
+	flagSet.Set("addon-config", filepath.Join("testdata", "grafana_enabled.yaml"))
+
+	upgrade, err := renderUpgrade(install.String(), upgradeOpts, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -529,32 +561,41 @@ func TestUpgradeOverwriteRemoveAddonKeys(t *testing.T) {
 
 /* Helpers */
 
-func testUpgradeOptions() (*installUpgradeOptions, error) {
+func testUpgradeOptions() ([]flag.Flag, *pflag.FlagSet, error) {
 	defaults, err := charts.NewValues(false)
 	if err != nil {
-		return nil, err
-	}
-	_, o, err := makeInstallUpgradeFlags(defaults)
-	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	o.controlPlaneVersion = upgradeControlPlaneVersion
-	o.proxyVersion = upgradeProxyVersion
-	o.debugImageVersion = upgradeDebugVersion
-	return o, nil
+	allStageFlags, allStageFlagSet := makeAllStageFlags(defaults)
+	upgradeFlags, upgradeFlagSet, err := makeInstallUpgradeFlags(defaults)
+	if err != nil {
+		return nil, nil, err
+	}
+	proxyFlags, proxyFlagSet := makeProxyFlags(defaults)
+
+	flags := flattenFlags(allStageFlags, upgradeFlags, proxyFlags)
+	flagSet := pflag.NewFlagSet("upgrade", pflag.ExitOnError)
+	flagSet.AddFlagSet(allStageFlagSet)
+	flagSet.AddFlagSet(upgradeFlagSet)
+	flagSet.AddFlagSet(proxyFlagSet)
+
+	flagSet.Set("control-plane-version", upgradeControlPlaneVersion)
+	flagSet.Set("proxy-version", upgradeProxyVersion)
+
+	return flags, flagSet, nil
 }
 
-func testOptions(t *testing.T) (*installUpgradeOptions, *installUpgradeOptions) {
-	installOpts, err := testInstallOptions()
+func testOptions(t *testing.T) (*charts.Values, []flag.Flag, *pflag.FlagSet) {
+	installValues, err := testInstallOptions()
 	if err != nil {
 		t.Fatalf("failed to create install options: %s", err)
 	}
-	upgradeOpts, err := testUpgradeOptions()
+	upgradeFlags, upgradeFlagSet, err := testUpgradeOptions()
 	if err != nil {
 		t.Fatalf("failed to create upgrade options: %s", err)
 	}
-	return installOpts, upgradeOpts
+	return installValues, upgradeFlags, upgradeFlagSet
 }
 
 func replaceVersions(manifest string) string {
@@ -693,26 +734,6 @@ func pathMatch(path []string, template []string) bool {
 	return true
 }
 
-func installValues(t *testing.T, installOpts *installUpgradeOptions, allStageOptions *allStageOptions) *linkerd2.Values {
-
-	installValues, err := linkerd2.NewValues(false)
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
-	err = installOpts.applyToValues(nil, installValues)
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
-	}
-
-	if allStageOptions != nil {
-		err = allStageOptions.overrideValues(installValues)
-		if err != nil {
-			t.Fatalf("Unexpected error: %v", err)
-		}
-	}
-	return installValues
-}
-
 func renderInstall(t *testing.T, values *linkerd2.Values) bytes.Buffer {
 	var installBuf bytes.Buffer
 	if err := render(&installBuf, values, ""); err != nil {
@@ -721,51 +742,25 @@ func renderInstall(t *testing.T, values *linkerd2.Values) bytes.Buffer {
 	return installBuf
 }
 
-func renderUpgrade(installManifest string, upgradeOpts *installUpgradeOptions, allStageOptions *allStageOptions, addonOverride bool) (bytes.Buffer, error) {
-	err := upgradeOpts.validate()
-	if err != nil {
-		return bytes.Buffer{}, err
-	}
+func renderUpgrade(installManifest string, upgradeOpts []flag.Flag, addonOverride bool) (bytes.Buffer, error) {
 	k, err := k8s.NewFakeAPIFromManifests([]io.Reader{strings.NewReader(installManifest)})
 	if err != nil {
 		return bytes.Buffer{}, err
 	}
 
-	upgradeOverrides, err := upgradeOpts.toOverrides(k)
-	if err != nil {
-		return bytes.Buffer{}, err
-	}
-	if allStageOptions != nil {
-		allStageOverrides, err := allStageOptions.toOverrides()
-		if err != nil {
-			return bytes.Buffer{}, err
-		}
-
-		fmt.Println("All stage overrides")
-		fmt.Println(allStageOverrides.String())
-
-		err = upgradeOverrides.Merge(allStageOverrides)
-		if err != nil {
-			return bytes.Buffer{}, err
-		}
-
-		fmt.Println("merged overrides")
-		fmt.Println(upgradeOverrides.String())
-	}
-
 	options := upgradeOptions{
 		addOnOverwrite: addonOverride,
 	}
-	return upgrade(k, &options, upgradeOverrides, "")
+	return upgrade(k, &options, upgradeOpts, "")
 }
 
-func renderInstallAndUpgrade(t *testing.T, installOpts *installUpgradeOptions, upgradeOpts *installUpgradeOptions) (bytes.Buffer, bytes.Buffer, error) {
-	err := installOpts.validate()
+func renderInstallAndUpgrade(t *testing.T, installOpts *charts.Values, upgradeOpts []flag.Flag) (bytes.Buffer, bytes.Buffer, error) {
+	err := validateValues(nil, installOpts)
 	if err != nil {
 		return bytes.Buffer{}, bytes.Buffer{}, err
 	}
-	installBuf := renderInstall(t, installValues(t, installOpts, nil))
-	upgradeBuf, err := renderUpgrade(installBuf.String(), upgradeOpts, nil, false)
+	installBuf := renderInstall(t, installOpts)
+	upgradeBuf, err := renderUpgrade(installBuf.String(), upgradeOpts, false)
 	return installBuf, upgradeBuf, err
 }
 
