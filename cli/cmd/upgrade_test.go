@@ -88,23 +88,26 @@ func TestUpgradeHA(t *testing.T) {
 }
 
 func TestUpgradeExternalIssuer(t *testing.T) {
-	installOpts, upgradeOpts, _ := testOptions(t)
+	installOpts, err := testInstallOptionsNoCerts(false)
+	if err != nil {
+		t.Fatalf("failed to create install options: %s", err)
+	}
+	upgradeOpts, _, err := testUpgradeOptions()
+	if err != nil {
+		t.Fatalf("failed to create upgrade options: %s", err)
+	}
 
 	issuer := generateIssuerCerts(t, true)
 	defer issuer.cleanup()
 
-	installOpts.Identity = &linkerd2.Identity{
-		Issuer: &linkerd2.Issuer{
-			Scheme: string(corev1.SecretTypeTLS),
-			TLS: &linkerd2.IssuerTLS{
-				CrtPEM: issuer.crt,
-				KeyPEM: issuer.key,
-			},
-		},
+	installOpts.Identity.Issuer.Scheme = string(corev1.SecretTypeTLS)
+	ca, err := base64.StdEncoding.DecodeString(issuer.ca)
+	if err != nil {
+		t.Fatal(err)
 	}
-	installOpts.Global.IdentityTrustAnchorsPEM = issuer.ca
+	installOpts.Global.IdentityTrustAnchorsPEM = string(ca)
 	install := renderInstall(t, installOpts)
-	upgrade, err := renderUpgrade(install.String()+externalIssuerSecret(issuer), upgradeOpts, false)
+	upgrade, err := renderUpgrade(install.String()+externalIssuerSecret(issuer), upgradeOpts)
 
 	if err != nil {
 		t.Fatal(err)
@@ -126,7 +129,7 @@ func TestUpgradeExternalIssuer(t *testing.T) {
 func TestUpgradeIssuerWithExternalIssuerFails(t *testing.T) {
 	installOpts, upgradeOpts, flagSet := testOptions(t)
 
-	issuer := generateIssuerCerts(t, false)
+	issuer := generateIssuerCerts(t, true)
 	defer issuer.cleanup()
 
 	installOpts.Global.IdentityTrustDomain = "cluster.local"
@@ -143,7 +146,7 @@ func TestUpgradeIssuerWithExternalIssuerFails(t *testing.T) {
 	flagSet.Set("identity-issuer-certificate-file", upgradedIssuer.crtFile)
 	flagSet.Set("identity-issuer-key-file", upgradedIssuer.keyFile)
 
-	_, err := renderUpgrade(install.String()+externalIssuerSecret(issuer), upgradeOpts, false)
+	_, err := renderUpgrade(install.String()+externalIssuerSecret(issuer), upgradeOpts)
 
 	expectedErr := "cannot update issuer certificates if you are using external cert management solution"
 
@@ -155,7 +158,7 @@ func TestUpgradeIssuerWithExternalIssuerFails(t *testing.T) {
 func TestUpgradeOverwriteIssuer(t *testing.T) {
 	installOpts, upgradeOpts, flagSet := testOptions(t)
 
-	issuerCerts := generateIssuerCerts(t, false)
+	issuerCerts := generateIssuerCerts(t, true)
 	defer issuerCerts.cleanup()
 
 	flagSet.Set("identity-trust-anchors-file", issuerCerts.caFile)
@@ -217,7 +220,7 @@ func TestUpgradeFailsWithOnlyIssuerCert(t *testing.T) {
 
 	_, _, err := renderInstallAndUpgrade(t, installOpts, upgradeOpts)
 
-	expectedErr := "a private key file must be specified if other credentials are provided"
+	expectedErr := "failed to validate issuer credentials: failed to read CA: tls: Public and private key do not match"
 
 	if err == nil || err.Error() != expectedErr {
 		t.Errorf("Expected error: %s but got %s", expectedErr, err)
@@ -235,7 +238,7 @@ func TestUpgradeFailsWithOnlyIssuerKey(t *testing.T) {
 
 	_, _, err := renderInstallAndUpgrade(t, installOpts, upgradeOpts)
 
-	expectedErr := "a certificate file must be specified if other credentials are provided"
+	expectedErr := "failed to validate issuer credentials: failed to read CA: tls: Public and private key do not match"
 
 	if err == nil || err.Error() != expectedErr {
 		t.Errorf("Expected error: %s but got %s", expectedErr, err)
@@ -257,7 +260,7 @@ func TestUpgradeRootFailsWithOldPods(t *testing.T) {
 	flagSet.Set("identity-issuer-certificate-file", issuerCerts.crtFile)
 	flagSet.Set("identity-issuer-key-file", issuerCerts.keyFile)
 
-	_, err := renderUpgrade(install.String()+podWithSidecar(oldIssuer), upgradeOpts, false)
+	_, err := renderUpgrade(install.String()+podWithSidecar(oldIssuer), upgradeOpts)
 
 	expectedErr := "You are attempting to use an issuer certificate which does not validate against the trust anchors of the following pods"
 	if err == nil || !strings.HasPrefix(err.Error(), expectedErr) {
@@ -272,7 +275,7 @@ func TestUpgradeTracingAddon(t *testing.T) {
 
 	flagSet.Set("addon-config", filepath.Join("testdata", "addon_config.yaml"))
 
-	upgrade, err := renderUpgrade(install.String(), upgradeOpts, false)
+	upgrade, err := renderUpgrade(install.String(), upgradeOpts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,11 +322,11 @@ func TestUpgradeOverwriteTracingAddon(t *testing.T) {
 
 	install := renderInstall(t, installOpts)
 
-	flagSet.Set("addon-config", filepath.Join("testdata", "addon_config.yaml"))
+	flagSet.Set("addon-config", filepath.Join("testdata", "addon_config_overwrite.yaml"))
 	flagSet.Set("trace-collector", "overwrite-collector")
 	flagSet.Set("trace-collector-svc-account", "overwrite-collector.default")
 
-	upgrade, err := renderUpgrade(install.String(), upgradeOpts, false)
+	upgrade, err := renderUpgrade(install.String(), upgradeOpts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -382,7 +385,7 @@ func TestUpgradeTwoLevelWebhookCrts(t *testing.T) {
 	}
 
 	install := renderInstall(t, installOpts)
-	upgrade, err := renderUpgrade(install.String(), upgradeOpts, false)
+	upgrade, err := renderUpgrade(install.String(), upgradeOpts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -413,7 +416,7 @@ func TestUpgradeWithAddonDisabled(t *testing.T) {
 	}
 
 	install := renderInstall(t, installOpts)
-	upgrade, err := renderUpgrade(install.String(), upgradeOpts, false)
+	upgrade, err := renderUpgrade(install.String(), upgradeOpts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -447,7 +450,7 @@ func TestUpgradeEnableAddon(t *testing.T) {
 
 	flagSet.Set("addon-config", filepath.Join("testdata", "grafana_enabled.yaml"))
 
-	upgrade, err := renderUpgrade(install.String(), upgradeOpts, false)
+	upgrade, err := renderUpgrade(install.String(), upgradeOpts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -499,7 +502,7 @@ func TestUpgradeRemoveAddonKeys(t *testing.T) {
 
 	flagSet.Set("addon-config", filepath.Join("testdata", "grafana_enabled.yaml"))
 
-	upgrade, err := renderUpgrade(install.String(), upgradeOpts, false)
+	upgrade, err := renderUpgrade(install.String(), upgradeOpts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -532,8 +535,9 @@ func TestUpgradeOverwriteRemoveAddonKeys(t *testing.T) {
 	install := renderInstall(t, installOpts)
 
 	flagSet.Set("addon-config", filepath.Join("testdata", "grafana_enabled.yaml"))
+	flagSet.Set("addon-override", "true")
 
-	upgrade, err := renderUpgrade(install.String(), upgradeOpts, true)
+	upgrade, err := renderUpgrade(install.String(), upgradeOpts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -742,16 +746,13 @@ func renderInstall(t *testing.T, values *linkerd2.Values) bytes.Buffer {
 	return installBuf
 }
 
-func renderUpgrade(installManifest string, upgradeOpts []flag.Flag, addonOverride bool) (bytes.Buffer, error) {
+func renderUpgrade(installManifest string, upgradeOpts []flag.Flag) (bytes.Buffer, error) {
 	k, err := k8s.NewFakeAPIFromManifests([]io.Reader{strings.NewReader(installManifest)})
 	if err != nil {
 		return bytes.Buffer{}, err
 	}
 
-	options := upgradeOptions{
-		addOnOverwrite: addonOverride,
-	}
-	return upgrade(k, &options, upgradeOpts, "")
+	return upgrade(k, upgradeOpts, "")
 }
 
 func renderInstallAndUpgrade(t *testing.T, installOpts *charts.Values, upgradeOpts []flag.Flag) (bytes.Buffer, bytes.Buffer, error) {
@@ -760,7 +761,7 @@ func renderInstallAndUpgrade(t *testing.T, installOpts *charts.Values, upgradeOp
 		return bytes.Buffer{}, bytes.Buffer{}, err
 	}
 	installBuf := renderInstall(t, installOpts)
-	upgradeBuf, err := renderUpgrade(installBuf.String(), upgradeOpts, false)
+	upgradeBuf, err := renderUpgrade(installBuf.String(), upgradeOpts)
 	return installBuf, upgradeBuf, err
 }
 

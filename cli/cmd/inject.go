@@ -12,7 +12,6 @@ import (
 
 	jsonpatch "github.com/evanphx/json-patch"
 	"github.com/linkerd/linkerd2/cli/flag"
-	cfg "github.com/linkerd/linkerd2/controller/gen/config"
 	charts "github.com/linkerd/linkerd2/pkg/charts/linkerd2"
 	"github.com/linkerd/linkerd2/pkg/inject"
 	"github.com/linkerd/linkerd2/pkg/k8s"
@@ -41,19 +40,6 @@ type (
 		enableDebugSidecar  bool
 		closeWaitTimeout    time.Duration
 	}
-
-	injectOptions struct {
-		manual                        bool
-		waitBeforeExitSeconds         uint64
-		disableIdentity               bool
-		disableTap                    bool
-		ignoreCluster                 bool
-		enableDebugSidecar            bool
-		traceCollector                string
-		traceCollectorSvcAccount      string
-		requireIdentityOnInboundPorts []string
-		closeWaitTimeout              time.Duration
-	}
 )
 
 func runInjectCmd(inputs []io.Reader, errWriter, outWriter io.Writer, transformer *resourceTransformerInject) int {
@@ -67,6 +53,7 @@ func newCmdInject() *cobra.Command {
 		os.Exit(1)
 	}
 	flags, proxyFlagSet := makeProxyFlags(defaults)
+	injectFlags, injectFlagSet := makeInjectFlags(defaults)
 	var manualOption, enableDebugSidecar bool
 	var closeWaitTimeout time.Duration
 
@@ -96,6 +83,9 @@ sub-folders, or coming from stdin.`,
 				if err != nil {
 					return err
 				}
+
+				// TODO: load fully hydraded values from configmap instead of
+				// using overrides from secret.
 				values, err = loadStoredValues(k)
 				if err != nil {
 					return err
@@ -106,7 +96,7 @@ sub-folders, or coming from stdin.`,
 			if err != nil {
 				return err
 			}
-			err = flag.ApplySetFlags(values, flags)
+			err = flag.ApplySetFlags(values, append(flags, injectFlags...))
 			if err != nil {
 				return err
 			}
@@ -132,24 +122,25 @@ sub-folders, or coming from stdin.`,
 		},
 	}
 
-	proxyFlagSet.BoolVar(
+	cmd.Flags().BoolVar(
 		&manualOption, "manual", manualOption,
 		"Include the proxy sidecar container spec in the YAML output (the auto-injector won't pick it up, so config annotations aren't supported) (default false)",
 	)
 
-	proxyFlagSet.BoolVar(
+	cmd.Flags().BoolVar(
 		&ignoreCluster, "ignore-cluster", false,
 		"Ignore the current Kubernetes cluster when checking for existing cluster configuration (default false)",
 	)
 
-	proxyFlagSet.BoolVar(&enableDebugSidecar, "enable-debug-sidecar", enableDebugSidecar,
+	cmd.Flags().BoolVar(&enableDebugSidecar, "enable-debug-sidecar", enableDebugSidecar,
 		"Inject a debug sidecar for data plane debugging")
 
-	proxyFlagSet.DurationVar(
+	cmd.Flags().DurationVar(
 		&closeWaitTimeout, "close-wait-timeout", closeWaitTimeout,
 		"Sets nf_conntrack_tcp_timeout_close_wait")
 
 	cmd.Flags().AddFlagSet(proxyFlagSet)
+	cmd.Flags().AddFlagSet(injectFlagSet)
 
 	return cmd
 }
@@ -163,7 +154,7 @@ func uninjectAndInject(inputs []io.Reader, errWriter, outWriter io.Writer, trans
 }
 
 func (rt resourceTransformerInject) transform(bytes []byte) ([]byte, []inject.Report, error) {
-	conf := inject.NewResourceConfigFromValues(rt.values, inject.OriginCLI)
+	conf := inject.NewResourceConfig(rt.values, inject.OriginCLI)
 
 	if rt.enableDebugSidecar {
 		conf.AppendPodAnnotation(k8s.ProxyEnableDebugAnnotation, "true")
@@ -454,45 +445,4 @@ func getOverrideAnnotations(values *charts.Values, base *charts.Values) map[stri
 
 func uintToString(v uint64) string {
 	return strconv.FormatUint(v, 10)
-}
-
-func toPort(p uint) *cfg.Port {
-	return &cfg.Port{Port: uint32(p)}
-}
-
-func parsePort(port *cfg.Port) string {
-	return strconv.FormatUint(uint64(port.GetPort()), 10)
-}
-
-func toPortRanges(portRanges []string) []*cfg.PortRange {
-	ports := make([]*cfg.PortRange, len(portRanges))
-	for i, p := range portRanges {
-		ports[i] = &cfg.PortRange{PortRange: p}
-	}
-	return ports
-}
-
-func parsePortRanges(portRanges []*cfg.PortRange) string {
-	var str string
-	for _, p := range portRanges {
-		str += p.GetPortRange() + ","
-	}
-
-	return strings.TrimSuffix(str, ",")
-}
-
-// overwriteRegistry replaces the registry-portion of the provided image with the provided registry.
-func overwriteRegistry(image, newRegistry string) string {
-	if image == "" {
-		return image
-	}
-	registry := newRegistry
-	if registry != "" && !strings.HasSuffix(registry, slash) {
-		registry += slash
-	}
-	imageName := image
-	if strings.Contains(image, slash) {
-		imageName = image[strings.LastIndex(image, slash)+1:]
-	}
-	return registry + imageName
 }

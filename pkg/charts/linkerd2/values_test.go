@@ -17,6 +17,7 @@ func TestNewValues(t *testing.T) {
 
 	expected := &Values{
 		ControllerImage:             "gcr.io/linkerd-io/controller",
+		ControllerImageVersion:      testVersion,
 		WebImage:                    "gcr.io/linkerd-io/web",
 		ControllerReplicas:          1,
 		ControllerUID:               2103,
@@ -142,6 +143,7 @@ func TestNewValues(t *testing.T) {
 	// pin the versions to ensure consistent test result.
 	// in non-test environment, the default versions are read from the
 	// values.yaml.
+	actual.ControllerImageVersion = testVersion
 	actual.Global.ControllerImageVersion = testVersion
 	actual.Global.Proxy.Image.Version = testVersion
 	actual.Global.ProxyInit.Image.Version = testVersion
@@ -236,6 +238,7 @@ func TestNewValues(t *testing.T) {
 		// pin the versions to ensure consistent test result.
 		// in non-test environment, the default versions are read from the
 		// values.yaml.
+		actual.ControllerImageVersion = testVersion
 		actual.Global.ControllerImageVersion = testVersion
 		actual.Global.Proxy.Image.Version = testVersion
 		actual.Global.ProxyInit.Image.Version = testVersion

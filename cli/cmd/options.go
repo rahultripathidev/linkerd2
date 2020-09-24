@@ -24,8 +24,9 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-/* Flag initialization */
-
+// makeInstallUpgradeFlags builds the set of flags which are used during the
+// "control-plane" stage of install and upgrade.  These flags control the
+// majority of how the control plane is configured.
 func makeInstallUpgradeFlags(defaults *l5dcharts.Values) ([]flag.Flag, *pflag.FlagSet, error) {
 	installUpgradeFlags := pflag.NewFlagSet("install", pflag.ExitOnError)
 
@@ -212,6 +213,9 @@ func loadKeyPEM(path string) (string, error) {
 	return cred.EncodePrivateKeyPEM(), nil
 }
 
+// makeAllStageFlags builds the set of flags which are used during all stages
+// of install and upgrade.  These flags influence cluster level configuration
+// and therefore are available during the "config" stage.
 func makeAllStageFlags(defaults *l5dcharts.Values) ([]flag.Flag, *pflag.FlagSet) {
 
 	allStageFlags := pflag.NewFlagSet("all-stage", pflag.ExitOnError)
@@ -239,7 +243,23 @@ func makeAllStageFlags(defaults *l5dcharts.Values) ([]flag.Flag, *pflag.FlagSet)
 					if err != nil {
 						return err
 					}
-					err = yaml.Unmarshal(data, values)
+					addonConfigs := make(map[string]interface{})
+					err = yaml.Unmarshal(data, &addonConfigs)
+					if err != nil {
+						return err
+					}
+					if addOnOverwrite {
+						if _, ok := addonConfigs["prometheus"]; ok {
+							values.Prometheus = make(l5dcharts.Prometheus)
+						}
+						if _, ok := addonConfigs["grafana"]; ok {
+							values.Grafana = make(l5dcharts.Grafana)
+						}
+						if _, ok := addonConfigs["tracing"]; ok {
+							values.Tracing = make(l5dcharts.Tracing)
+						}
+					}
+					err = yaml.Unmarshal(data, &values)
 					if err != nil {
 						return err
 					}
@@ -251,6 +271,9 @@ func makeAllStageFlags(defaults *l5dcharts.Values) ([]flag.Flag, *pflag.FlagSet)
 	return flags, allStageFlags
 }
 
+// makeInstallFlags builds the set of flags which are used during the
+// "control-plane" stage of install.  These flags should not be changed during
+// an upgrade and are not available to the upgrade command.
 func makeInstallFlags(defaults *l5dcharts.Values) ([]flag.Flag, *pflag.FlagSet) {
 
 	installOnlyFlags := pflag.NewFlagSet("install-only", pflag.ExitOnError)
@@ -282,29 +305,9 @@ func makeInstallFlags(defaults *l5dcharts.Values) ([]flag.Flag, *pflag.FlagSet) 
 	return flags, installOnlyFlags
 }
 
-// upgradeOnlyFlagSet includes flags that are only accessible at upgrade-time
-// and not at install-time. also these flags are not intended to be persisted
-// via linkerd-config ConfigMap, unlike recordableFlagSet
-func makeUpgradeFlags() (*upgradeOptions, *pflag.FlagSet) {
-	var options upgradeOptions
-
-	upgradeFlags := pflag.NewFlagSet("upgrade-only", pflag.ExitOnError)
-
-	upgradeFlags.StringVar(
-		&options.manifests, "from-manifests", "",
-		"Read config from a Linkerd install YAML rather than from Kubernetes",
-	)
-	upgradeFlags.BoolVar(
-		&options.force, "force", false,
-		"Force upgrade operation even when issuer certificate does not work with the trust anchors of all proxies",
-	)
-	upgradeFlags.BoolVar(
-		&options.addOnOverwrite, "addon-overwrite", false,
-		"Overwrite (instead of merge) existing add-ons config with file in --addon-config (or reset to defaults if no new config is passed)",
-	)
-	return &options, upgradeFlags
-}
-
+// makeProxyFlags builds the set of flags which affect how the proxy is
+// configured.  These flags are available to the inject command and to the
+// install and upgrade commands in the "control-plane" stage.
 func makeProxyFlags(defaults *l5dcharts.Values) ([]flag.Flag, *pflag.FlagSet) {
 
 	proxyFlags := pflag.NewFlagSet("proxy", pflag.ExitOnError)
@@ -341,6 +344,7 @@ func makeProxyFlags(defaults *l5dcharts.Values) ([]flag.Flag, *pflag.FlagSet) {
 				values.DebugContainer.Image.Name = registryOverride(values.DebugContainer.Image.Name, value)
 				values.Global.Proxy.Image.Name = registryOverride(values.Global.Proxy.Image.Name, value)
 				values.DebugContainer.Image.Name = registryOverride(values.DebugContainer.Image.Name, value)
+				values.Global.ProxyInit.Image.Name = registryOverride(values.Global.ProxyInit.Image.Name, value)
 				return nil
 			}),
 
@@ -462,6 +466,11 @@ func makeProxyFlags(defaults *l5dcharts.Values) ([]flag.Flag, *pflag.FlagSet) {
 	return flags, proxyFlags
 }
 
+// makeInjectFlags builds the set of flags which are exclusive to the inject
+// command.  These flags configure the proxy but are not available to the
+// install and upgrade commands.  This is generally for proxy configuration
+// which is intended to be set on individual workloads rather than being
+// cluster wide.
 func makeInjectFlags(defaults *l5dcharts.Values) ([]flag.Flag, *pflag.FlagSet) {
 	injectFlags := pflag.NewFlagSet("inject", pflag.ExitOnError)
 
@@ -508,7 +517,7 @@ func makeInjectFlags(defaults *l5dcharts.Values) ([]flag.Flag, *pflag.FlagSet) {
 	return flags, injectFlags
 }
 
-/* Option validation */
+/* Validation */
 
 func validateValues(k *k8s.KubernetesAPI, values *l5dcharts.Values) error {
 	if !alphaNumDashDot.MatchString(values.ControllerImageVersion) {
@@ -542,6 +551,15 @@ func validateValues(k *k8s.KubernetesAPI, values *l5dcharts.Values) error {
 	err := validateProxyValues(values)
 	if err != nil {
 		return err
+	}
+
+	if values.Identity.Issuer.Scheme == string(corev1.SecretTypeTLS) {
+		if values.Identity.Issuer.TLS.CrtPEM != "" {
+			return errors.New("--identity-issuer-certificate-file must not be specified if --identity-external-issuer=true")
+		}
+		if values.Identity.Issuer.TLS.KeyPEM != "" {
+			return errors.New("--identity-issuer-key-file must not be specified if --identity-external-issuer=true")
+		}
 	}
 
 	if values.Identity.Issuer.Scheme == string(corev1.SecretTypeTLS) && k != nil {
@@ -586,38 +604,46 @@ func validateProxyValues(values *l5dcharts.Values) error {
 		return fmt.Errorf("%s is not a valid version", values.Global.Proxy.Image.Version)
 	}
 
-	if !alphaNumDashDot.MatchString(values.Global.ProxyInit.Image.Name) {
-		return fmt.Errorf("%s is not a valid version", values.Global.ProxyInit.Image.Name)
+	if !alphaNumDashDot.MatchString(values.Global.ProxyInit.Image.Version) {
+		return fmt.Errorf("%s is not a valid version", values.Global.ProxyInit.Image.Version)
 	}
 
 	if values.Global.ImagePullPolicy != "Always" && values.Global.ImagePullPolicy != "IfNotPresent" && values.Global.ImagePullPolicy != "Never" {
 		return fmt.Errorf("--image-pull-policy must be one of: Always, IfNotPresent, Never")
 	}
 
-	if _, err := k8sResource.ParseQuantity(values.Global.Proxy.Resources.CPU.Request); err != nil {
-		return fmt.Errorf("Invalid cpu request '%s' for --proxy-cpu-request flag", values.Global.Proxy.Resources.CPU.Request)
+	if values.Global.Proxy.Resources.CPU.Request != "" {
+		if _, err := k8sResource.ParseQuantity(values.Global.Proxy.Resources.CPU.Request); err != nil {
+			return fmt.Errorf("Invalid cpu request '%s' for --proxy-cpu-request flag", values.Global.Proxy.Resources.CPU.Request)
+		}
 	}
 
-	if _, err := k8sResource.ParseQuantity(values.Global.Proxy.Resources.Memory.Request); err != nil {
-		return fmt.Errorf("Invalid memory request '%s' for --proxy-memory-request flag", values.Global.Proxy.Resources.Memory.Request)
+	if values.Global.Proxy.Resources.Memory.Request != "" {
+		if _, err := k8sResource.ParseQuantity(values.Global.Proxy.Resources.Memory.Request); err != nil {
+			return fmt.Errorf("Invalid memory request '%s' for --proxy-memory-request flag", values.Global.Proxy.Resources.Memory.Request)
+		}
 	}
 
-	cpuLimit, err := k8sResource.ParseQuantity(values.Global.Proxy.Resources.CPU.Limit)
-	if err != nil {
-		return fmt.Errorf("Invalid cpu limit '%s' for --proxy-cpu-limit flag", values.Global.Proxy.Resources.CPU.Limit)
-	}
-	// Not checking for error because option proxyCPURequest was already validated
-	if cpuRequest, _ := k8sResource.ParseQuantity(values.Global.Proxy.Resources.CPU.Request); cpuRequest.MilliValue() > cpuLimit.MilliValue() {
-		return fmt.Errorf("The cpu limit '%s' cannot be lower than the cpu request '%s'", values.Global.Proxy.Resources.CPU.Limit, values.Global.Proxy.Resources.CPU.Request)
+	if values.Global.Proxy.Resources.CPU.Limit != "" {
+		cpuLimit, err := k8sResource.ParseQuantity(values.Global.Proxy.Resources.CPU.Limit)
+		if err != nil {
+			return fmt.Errorf("Invalid cpu limit '%s' for --proxy-cpu-limit flag", values.Global.Proxy.Resources.CPU.Limit)
+		}
+		// Not checking for error because option proxyCPURequest was already validated
+		if cpuRequest, _ := k8sResource.ParseQuantity(values.Global.Proxy.Resources.CPU.Request); cpuRequest.MilliValue() > cpuLimit.MilliValue() {
+			return fmt.Errorf("The cpu limit '%s' cannot be lower than the cpu request '%s'", values.Global.Proxy.Resources.CPU.Limit, values.Global.Proxy.Resources.CPU.Request)
+		}
 	}
 
-	memoryLimit, err := k8sResource.ParseQuantity(values.Global.Proxy.Resources.Memory.Limit)
-	if err != nil {
-		return fmt.Errorf("Invalid memory limit '%s' for --proxy-memory-limit flag", values.Global.Proxy.Resources.Memory.Limit)
-	}
-	// Not checking for error because option proxyMemoryRequest was already validated
-	if memoryRequest, _ := k8sResource.ParseQuantity(values.Global.Proxy.Resources.Memory.Request); memoryRequest.Value() > memoryLimit.Value() {
-		return fmt.Errorf("The memory limit '%s' cannot be lower than the memory request '%s'", values.Global.Proxy.Resources.Memory.Limit, values.Global.Proxy.Resources.Memory.Request)
+	if values.Global.Proxy.Resources.Memory.Limit != "" {
+		memoryLimit, err := k8sResource.ParseQuantity(values.Global.Proxy.Resources.Memory.Limit)
+		if err != nil {
+			return fmt.Errorf("Invalid memory limit '%s' for --proxy-memory-limit flag", values.Global.Proxy.Resources.Memory.Limit)
+		}
+		// Not checking for error because option proxyMemoryRequest was already validated
+		if memoryRequest, _ := k8sResource.ParseQuantity(values.Global.Proxy.Resources.Memory.Request); memoryRequest.Value() > memoryLimit.Value() {
+			return fmt.Errorf("The memory limit '%s' cannot be lower than the memory request '%s'", values.Global.Proxy.Resources.Memory.Limit, values.Global.Proxy.Resources.Memory.Request)
+		}
 	}
 
 	if !validProxyLogLevel.MatchString(values.Global.Proxy.LogLevel) {
@@ -625,19 +651,25 @@ func validateProxyValues(values *l5dcharts.Values) error {
 			values.Global.Proxy.LogLevel)
 	}
 
-	if err := validateRangeSlice(strings.Split(values.Global.ProxyInit.IgnoreInboundPorts, ",")); err != nil {
-		return err
+	if values.Global.ProxyInit.IgnoreInboundPorts != "" {
+		if err := validateRangeSlice(strings.Split(values.Global.ProxyInit.IgnoreInboundPorts, ",")); err != nil {
+			return err
+		}
 	}
 
-	if err := validateRangeSlice(strings.Split(values.Global.ProxyInit.IgnoreOutboundPorts, ",")); err != nil {
-		return err
+	if values.Global.ProxyInit.IgnoreOutboundPorts != "" {
+		if err := validateRangeSlice(strings.Split(values.Global.ProxyInit.IgnoreOutboundPorts, ",")); err != nil {
+			return err
+		}
 	}
 
 	return nil
 }
 
-/* Identity */
-
+// initializeIssuerCredentials populates the identity issuer TLS credentials.
+// If we are using an externally managed issuer secret, all we need to do here
+// is copy the trust root from the issuer secret.  Otherwise, if no credentials
+// have already been supplied, we generate them.
 func initializeIssuerCredentials(k *k8s.KubernetesAPI, values *l5dcharts.Values) error {
 	if values.Identity.Issuer.Scheme == string(corev1.SecretTypeTLS) {
 		// Using externally managed issuer credentials.  We need to copy the

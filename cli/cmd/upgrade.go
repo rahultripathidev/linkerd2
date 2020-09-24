@@ -15,6 +15,7 @@ import (
 	"github.com/linkerd/linkerd2/pkg/k8s"
 	"github.com/linkerd/linkerd2/pkg/tls"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	corev1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -27,14 +28,25 @@ const (
 	trustRootChangeMessage = "Rotating the trust anchors will affect existing proxies\nSee https://linkerd.io/2/tasks/rotating_identity_certificates/ for more information"
 )
 
-type upgradeOptions struct {
+var (
 	addOnOverwrite bool
 	manifests      string
 	force          bool
-}
+)
+
+/* The upgrade commands all follow the same flow:
+ * 1. Load default values from the Linkerd2 chart
+ * 2. Update the values with stored overrides
+ * 3. Apply flags to further modify the values
+ * 4. Render the chart using those values
+ *
+ * The individual commands (upgrade, upgrade config, and upgrade control-plane)
+ * differ in which flags are available to each, what pre-check validations
+ * are done, and which subset of the chart is rendered.
+ */
 
 // newCmdUpgradeConfig is a subcommand for `linkerd upgrade config`
-func newCmdUpgradeConfig(values *l5dcharts.Values, options *upgradeOptions) *cobra.Command {
+func newCmdUpgradeConfig(values *l5dcharts.Values) *cobra.Command {
 	allStageFlags, allStageFlagSet := makeAllStageFlags(values)
 
 	cmd := &cobra.Command{
@@ -48,11 +60,11 @@ Note that this command should be followed by "linkerd upgrade control-plane".`,
   linkerd upgrade config | kubectl apply -f -`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 
-			k, err := k8sClient(options.manifests)
+			k, err := k8sClient(manifests)
 			if err != nil {
 				return err
 			}
-			return upgradeRunE(k, options, allStageFlags, configStage)
+			return upgradeRunE(k, allStageFlags, configStage)
 		},
 	}
 
@@ -62,7 +74,7 @@ Note that this command should be followed by "linkerd upgrade control-plane".`,
 }
 
 // newCmdUpgradeControlPlane is a subcommand for `linkerd upgrade control-plane`
-func newCmdUpgradeControlPlane(values *l5dcharts.Values, options *upgradeOptions) *cobra.Command {
+func newCmdUpgradeControlPlane(values *l5dcharts.Values) *cobra.Command {
 	allStageFlags, allStageFlagSet := makeAllStageFlags(values)
 	installUpgradeFlags, installUpgradeFlagSet, err := makeInstallUpgradeFlags(values)
 	if err != nil {
@@ -85,11 +97,11 @@ install command. It should be run after "linkerd upgrade config".`,
 		Example: `  # Default upgrade.
   linkerd upgrade control-plane | kubectl apply -f -`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			k, err := k8sClient(options.manifests)
+			k, err := k8sClient(manifests)
 			if err != nil {
 				return err
 			}
-			return upgradeRunE(k, options, flags, controlPlaneStage)
+			return upgradeRunE(k, flags, controlPlaneStage)
 		},
 	}
 
@@ -116,7 +128,7 @@ func newCmdUpgrade() *cobra.Command {
 	proxyFlags, proxyFlagSet := makeProxyFlags(values)
 	flags := flattenFlags(allStageFlags, installUpgradeFlags, proxyFlags)
 
-	options, upgradeFlagSet := makeUpgradeFlags()
+	upgradeFlagSet := makeUpgradeFlags()
 
 	cmd := &cobra.Command{
 		Use:   "upgrade [flags]",
@@ -134,11 +146,11 @@ install command.`,
   # Similar to install, upgrade may also be broken up into two stages, by user
   # privilege.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			k, err := k8sClient(options.manifests)
+			k, err := k8sClient(manifests)
 			if err != nil {
 				return err
 			}
-			return upgradeRunE(k, options, flags, "")
+			return upgradeRunE(k, flags, "")
 		},
 	}
 
@@ -147,8 +159,8 @@ install command.`,
 	cmd.Flags().AddFlagSet(proxyFlagSet)
 	cmd.PersistentFlags().AddFlagSet(upgradeFlagSet)
 
-	cmd.AddCommand(newCmdUpgradeConfig(values, options))
-	cmd.AddCommand(newCmdUpgradeControlPlane(values, options))
+	cmd.AddCommand(newCmdUpgradeConfig(values))
+	cmd.AddCommand(newCmdUpgradeControlPlane(values))
 
 	return cmd
 }
@@ -176,9 +188,31 @@ func k8sClient(manifestsFile string) (*k8s.KubernetesAPI, error) {
 	return k, nil
 }
 
-func upgradeRunE(k *k8s.KubernetesAPI, options *upgradeOptions, flags []flag.Flag, stage string) error {
+// makeUpgradeFlags returns a FlagSet of flags that are only accessible at upgrade-time
+// and not at install-time.  These flags do not configure the Values used to
+// render the chart but instead modify the behavior of the upgrade command itself.
+// They are not persisted in any way.
+func makeUpgradeFlags() *pflag.FlagSet {
+	upgradeFlags := pflag.NewFlagSet("upgrade-only", pflag.ExitOnError)
 
-	buf, err := upgrade(k, options, flags, stage)
+	upgradeFlags.StringVar(
+		&manifests, "from-manifests", "",
+		"Read config from a Linkerd install YAML rather than from Kubernetes",
+	)
+	upgradeFlags.BoolVar(
+		&force, "force", false,
+		"Force upgrade operation even when issuer certificate does not work with the trust anchors of all proxies",
+	)
+	upgradeFlags.BoolVar(
+		&addOnOverwrite, "addon-overwrite", false,
+		"Overwrite (instead of merge) existing add-ons config with file in --addon-config (or reset to defaults if no new config is passed)",
+	)
+	return upgradeFlags
+}
+
+func upgradeRunE(k *k8s.KubernetesAPI, flags []flag.Flag, stage string) error {
+
+	buf, err := upgrade(k, flags, stage)
 	if err != nil {
 		return err
 	}
@@ -197,19 +231,19 @@ func upgradeRunE(k *k8s.KubernetesAPI, options *upgradeOptions, flags []flag.Fla
 	return nil
 }
 
-func upgrade(k *k8s.KubernetesAPI, options *upgradeOptions, flags []flag.Flag, stage string) (bytes.Buffer, error) {
+func upgrade(k *k8s.KubernetesAPI, flags []flag.Flag, stage string) (bytes.Buffer, error) {
 	values, err := loadStoredValues(k)
+	if err != nil {
+		return bytes.Buffer{}, err
+	}
+	// If there is no linkerd-config-overrides secret, assume we are upgrading
+	// from a verion of Linkerd prior to the introduction of this secret.  In
+	// this case we load the values from the legacy linkerd-config configmap.
 	if values == nil {
-		values, err = loadStoredValuesLegacy(k, options)
+		values, err = loadStoredValuesLegacy(k)
 		if err != nil {
 			return bytes.Buffer{}, err
 		}
-	}
-
-	if options.addOnOverwrite {
-		values.Tracing = make(l5dcharts.Tracing)
-		values.Grafana = make(l5dcharts.Grafana)
-		values.Prometheus = make(l5dcharts.Prometheus)
 	}
 
 	err = flag.ApplySetFlags(values, flags)
@@ -229,7 +263,7 @@ func upgrade(k *k8s.KubernetesAPI, options *upgradeOptions, flags []flag.Flag, s
 	if err != nil {
 		return bytes.Buffer{}, err
 	}
-	if !options.force {
+	if !force && values.Identity.Issuer.Scheme == k8s.IdentityIssuerSchemeLinkerd {
 		err = ensureIssuerCertWorksWithAllProxies(k, values)
 		if err != nil {
 			return bytes.Buffer{}, err
@@ -247,6 +281,13 @@ func upgrade(k *k8s.KubernetesAPI, options *upgradeOptions, flags []flag.Flag, s
 }
 
 func loadStoredValues(k *k8s.KubernetesAPI) (*charts.Values, error) {
+	// Load the default values from the chart.
+	values, err := charts.NewValues(false)
+	if err != nil {
+		return nil, err
+	}
+
+	// Load the stored overrides from the linkerd-config-overrides secret.
 	secret, err := k.CoreV1().Secrets(controlPlaneNamespace).Get("linkerd-config-overrides", metav1.GetOptions{})
 	if kerrors.IsNotFound(err) {
 		return nil, nil
@@ -260,11 +301,8 @@ func loadStoredValues(k *k8s.KubernetesAPI) (*charts.Values, error) {
 		return nil, errors.New("secret/linkerd-config-overrides is missing linkerd-config-overrides data")
 	}
 
-	values, err := charts.NewValues(false)
-	if err != nil {
-		return nil, err
-	}
-
+	// Unmarshal the overrides directly onto the values.  This has the effect
+	// of merging the two with the overrides taking priority.
 	err = yaml.Unmarshal(bytes, values)
 	if err != nil {
 		return nil, err

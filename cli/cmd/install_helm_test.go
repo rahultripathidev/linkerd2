@@ -56,6 +56,7 @@ func testRenderHelm(t *testing.T, chart *pb.Chart, goldenFileName string) {
   "global":{
    "cliVersion":"",
    "linkerdVersion":"linkerd-version",
+   "controllerImageVersion":"linkerd-version",
    "identityTrustAnchorsPEM":"test-trust-anchor",
    "identityTrustDomain":"test.trust.domain",
    "proxy":{
@@ -149,7 +150,7 @@ func testRenderHelm(t *testing.T, chart *pb.Chart, goldenFileName string) {
 }
 
 func chartControlPlane(t *testing.T, ha bool, addOnConfig string, ignoreOutboundPorts string, ignoreInboundPorts string) *pb.Chart {
-	values, err := readTestValues(t, ha, ignoreOutboundPorts, ignoreInboundPorts)
+	values, err := readTestValues(ha, ignoreOutboundPorts, ignoreInboundPorts)
 	if err != nil {
 		t.Fatal("Unexpected error", err)
 	}
@@ -279,10 +280,10 @@ func chartPartials(t *testing.T, paths []string) *pb.Chart {
 	return chart
 }
 
-func readTestValues(t *testing.T, ha bool, ignoreOutboundPorts string, ignoreInboundPorts string) (*l5dcharts.Values, error) {
+func readTestValues(ha bool, ignoreOutboundPorts string, ignoreInboundPorts string) (*l5dcharts.Values, error) {
 	values, err := l5dcharts.NewValues(ha)
 	if err != nil {
-		t.Fatal("Unexpected error", err)
+		return nil, err
 	}
 	values.Global.ProxyInit.IgnoreOutboundPorts = ignoreOutboundPorts
 	values.Global.ProxyInit.IgnoreInboundPorts = ignoreInboundPorts

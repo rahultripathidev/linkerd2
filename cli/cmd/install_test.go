@@ -20,13 +20,17 @@ const (
 )
 
 func TestRender(t *testing.T) {
-	defaultValues, err := charts.NewValues(false)
+	defaultValues, err := testInstallOptions()
+	if err != nil {
+		t.Fatal(err)
+	}
 	addFakeTLSSecrets(defaultValues)
 
 	// A configuration that shows that all config setting strings are honored
 	// by `render()`.
 	metaValues := &charts.Values{
 		ControllerImage:             "ControllerImage",
+		ControllerImageVersion:      "ControllerImageVersion",
 		WebImage:                    "WebImage",
 		ControllerUID:               2103,
 		EnableH2Upgrade:             true,
@@ -117,13 +121,13 @@ func TestRender(t *testing.T) {
 		Grafana: defaultValues.Grafana,
 	}
 
-	haValues, err := charts.NewValues(true)
+	haValues, err := testInstallOptionsHA(true)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v\n", err)
 	}
 	addFakeTLSSecrets(haValues)
 
-	haWithOverridesValues, err := charts.NewValues(true)
+	haWithOverridesValues, err := testInstallOptionsHA(true)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v\n", err)
 	}
@@ -134,7 +138,7 @@ func TestRender(t *testing.T) {
 	haWithOverridesValues.Global.Proxy.Resources.Memory.Request = "300Mi"
 	addFakeTLSSecrets(haWithOverridesValues)
 
-	cniEnabledValues, err := charts.NewValues(false)
+	cniEnabledValues, err := testInstallOptions()
 	if err != nil {
 		t.Fatalf("Unexpected error: %v\n", err)
 	}
@@ -142,7 +146,7 @@ func TestRender(t *testing.T) {
 	cniEnabledValues.Global.CNIEnabled = true
 	addFakeTLSSecrets(cniEnabledValues)
 
-	withProxyIgnoresValues, err := charts.NewValues(false)
+	withProxyIgnoresValues, err := testInstallOptions()
 	if err != nil {
 		t.Fatalf("Unexpected error: %v\n", err)
 	}
@@ -150,21 +154,21 @@ func TestRender(t *testing.T) {
 	withProxyIgnoresValues.Global.ProxyInit.IgnoreOutboundPorts = "5432"
 	addFakeTLSSecrets(withProxyIgnoresValues)
 
-	withHeartBeatDisabledValues, err := charts.NewValues(false)
+	withHeartBeatDisabledValues, err := testInstallOptions()
 	if err != nil {
 		t.Fatalf("Unexpected error: %v\n", err)
 	}
 	withHeartBeatDisabledValues.DisableHeartBeat = true
 	addFakeTLSSecrets(withHeartBeatDisabledValues)
 
-	withRestrictedDashboardPrivilegesValues, err := charts.NewValues(false)
+	withRestrictedDashboardPrivilegesValues, err := testInstallOptions()
 	if err != nil {
 		t.Fatalf("Unexpected error: %v\n", err)
 	}
 	withRestrictedDashboardPrivilegesValues.RestrictDashboardPrivileges = true
 	addFakeTLSSecrets(withRestrictedDashboardPrivilegesValues)
 
-	withControlPlaneTracingValues, err := charts.NewValues(false)
+	withControlPlaneTracingValues, err := testInstallOptions()
 	if err != nil {
 		t.Fatalf("Unexpected error: %v\n", err)
 	}
@@ -172,26 +176,29 @@ func TestRender(t *testing.T) {
 	addFakeTLSSecrets(withControlPlaneTracingValues)
 
 	customRegistryOverride := "my.custom.registry/linkerd-io"
-	withCustomRegistryValues, err := charts.NewValues(false)
+	withCustomRegistryValues, err := testInstallOptions()
 	if err != nil {
 		t.Fatalf("Unexpected error: %v\n", err)
 	}
-	flags, flagSet, err := makeInstallUpgradeFlags(withCustomRegistryValues)
+	flags, flagSet := makeProxyFlags(withCustomRegistryValues)
+	err = flagSet.Set("registry", customRegistryOverride)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v\n", err)
 	}
-	flagSet.Set("docker-registry", customRegistryOverride)
 	err = flag.ApplySetFlags(withCustomRegistryValues, flags)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v\n", err)
 	}
 	addFakeTLSSecrets(withCustomRegistryValues)
 
-	withAddOnValues, err := charts.NewValues(false)
+	withAddOnValues, err := testInstallOptions()
+	if err != nil {
+		t.Fatalf("Unexpected error: %v\n", err)
+	}
 	withAddOnValues.Tracing["enabled"] = true
 	addFakeTLSSecrets(withAddOnValues)
 
-	withCustomDestinationGetNetsValues, err := charts.NewValues(false)
+	withCustomDestinationGetNetsValues, err := testInstallOptions()
 	if err != nil {
 		t.Fatalf("Unexpected error: %v\n", err)
 	}
@@ -255,16 +262,14 @@ func TestValidateAndBuild_Errors(t *testing.T) {
 }
 
 func testInstallOptions() (*charts.Values, error) {
-	values, err := charts.NewValues(false)
+	return testInstallOptionsHA(false)
+}
+
+func testInstallOptionsHA(ha bool) (*charts.Values, error) {
+	values, err := testInstallOptionsNoCerts(ha)
 	if err != nil {
 		return nil, err
 	}
-
-	values.Global.Proxy.Image.Version = installProxyVersion
-	values.DebugContainer.Image.Version = installDebugVersion
-	values.ControllerImageVersion = installControlPlaneVersion
-	values.Global.ControllerImageVersion = installControlPlaneVersion
-	values.HeartbeatSchedule = fakeHeartbeatSchedule()
 
 	data, err := ioutil.ReadFile(filepath.Join("testdata", "valid-crt.pem"))
 	if err != nil {
@@ -289,6 +294,21 @@ func testInstallOptions() (*charts.Values, error) {
 		return nil, err
 	}
 	values.Global.IdentityTrustAnchorsPEM = string(data)
+
+	return values, nil
+}
+
+func testInstallOptionsNoCerts(ha bool) (*charts.Values, error) {
+	values, err := charts.NewValues(ha)
+	if err != nil {
+		return nil, err
+	}
+
+	values.Global.Proxy.Image.Version = installProxyVersion
+	values.DebugContainer.Image.Version = installDebugVersion
+	values.ControllerImageVersion = installControlPlaneVersion
+	values.Global.ControllerImageVersion = installControlPlaneVersion
+	values.HeartbeatSchedule = fakeHeartbeatSchedule()
 
 	return values, nil
 }
@@ -389,10 +409,10 @@ func TestValidate(t *testing.T) {
 			expectedError string
 		}{
 			{"valid", ""},
-			{"expired", "failed to verify issuer certs stored on disk: not valid anymore. Expired on 1990-01-01T01:01:11Z"},
-			{"not-valid-yet", "failed to verify issuer certs stored on disk: not valid before: 2100-01-01T01:00:51Z"},
-			{"wrong-domain", "failed to verify issuer certs stored on disk: x509: certificate is valid for wrong.linkerd.cluster.local, not identity.linkerd.cluster.local"},
-			{"wrong-algo", "failed to verify issuer certs stored on disk: must use P-256 curve for public key, instead P-521 was used"},
+			{"expired", "failed to validate issuer credentials: not valid anymore. Expired on 1990-01-01T01:01:11Z"},
+			{"not-valid-yet", "failed to validate issuer credentials: not valid before: 2100-01-01T01:00:51Z"},
+			{"wrong-domain", "failed to validate issuer credentials: x509: certificate is valid for wrong.linkerd.cluster.local, not identity.linkerd.cluster.local"},
+			{"wrong-algo", "failed to validate issuer credentials: must use P-256 curve for public key, instead P-521 was used"},
 		}
 		for _, tc := range testCases {
 
@@ -438,7 +458,7 @@ func TestValidate(t *testing.T) {
 
 	t.Run("Rejects identity cert files data when external issuer is set", func(t *testing.T) {
 
-		values, err := testInstallOptions()
+		values, err := testInstallOptionsNoCerts(false)
 		if err != nil {
 			t.Fatalf("Unexpected error: %v\n", err)
 		}
@@ -450,9 +470,6 @@ func TestValidate(t *testing.T) {
 		withCrtFile, _ := values.DeepCopy()
 		withCrtFile.Identity.Issuer.TLS.CrtPEM = "certificate"
 
-		withTrustAnchorsFile, _ := values.DeepCopy()
-		withTrustAnchorsFile.Global.IdentityTrustAnchorsPEM = "trust anchors"
-
 		withKeyFile, _ := values.DeepCopy()
 		withKeyFile.Identity.Issuer.TLS.KeyPEM = "key"
 
@@ -462,7 +479,6 @@ func TestValidate(t *testing.T) {
 		}{
 			{withoutCertDataOptions, ""},
 			{withCrtFile, "--identity-issuer-certificate-file must not be specified if --identity-external-issuer=true"},
-			{withTrustAnchorsFile, "--identity-trust-anchors-file must not be specified if --identity-external-issuer=true"},
 			{withKeyFile, "--identity-issuer-key-file must not be specified if --identity-external-issuer=true"},
 		}
 
@@ -471,14 +487,14 @@ func TestValidate(t *testing.T) {
 
 			if tc.expectedError != "" {
 				if err == nil {
-					t.Fatal("Expected error, got nothing")
+					t.Fatalf("Expected error '%s', got nothing", tc.expectedError)
 				}
 				if err.Error() != tc.expectedError {
 					t.Fatalf("Expected error string\"%s\", got \"%s\"", tc.expectedError, err)
 				}
 			} else {
 				if err != nil {
-					t.Fatalf("Expected no error bu got \"%s\"", err)
+					t.Fatalf("Expected no error but got \"%s\"", err)
 
 				}
 			}
